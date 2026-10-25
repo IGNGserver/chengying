@@ -180,6 +180,31 @@ static void dump_field(field_t *f, int depth) {
 }
 
 typedef int (*int_fn)(void);
+typedef int (*cs_fn)(void *, void *, void *);
+
+/* Call a colorspace query with NULL module/pipe arguments in a throw-away child:
+ * most modules answer with a constant, a few dereference the module and would
+ * crash — those are reported as unknown (-99) instead of aborting the dump. */
+static int guarded_cs(cs_fn fn) {
+  if (!fn) return -98;
+  int fds[2];
+  if (pipe(fds) != 0) return -97;
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(fds[0]);
+    int v = fn(NULL, NULL, NULL);
+    if (write(fds[1], &v, sizeof v) != sizeof v) _exit(2);
+    _exit(0);
+  }
+  close(fds[1]);
+  int v = -99;
+  ssize_t r = read(fds[0], &v, sizeof v);
+  close(fds[0]);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  if (r != sizeof v || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return -99;
+  return v;
+}
 typedef const char *(*name_fn)(void);
 typedef introspection_t *(*intro_fn)(void);
 typedef int (*init_fn)(void *, int);
@@ -204,6 +229,9 @@ static int probe(const char *path, const char *op) {
   if (mod_version) printf(",\"moduleVersion\":%d", mod_version());
   if (group) printf(",\"group\":%d", group());
   if (flags) printf(",\"flags\":%d", flags());
+  printf(",\"defaultColorspace\":%d", guarded_cs((cs_fn)dlsym(h, "default_colorspace")));
+  cs_fn blend_cs = (cs_fn)dlsym(h, "blend_colorspace");
+  printf(",\"blendColorspace\":%d", blend_cs ? guarded_cs(blend_cs) : -98);
   if (!get_intro || !intro_init) {
     printf(",\"introspection\":false}");
     return 0;
@@ -223,6 +251,80 @@ static int probe(const char *path, const char *op) {
   return 0;
 }
 
+/* Blend params layout version of the installed libdarktable (dt_develop_blend_version()). */
+static int probe_blend_version(const char *plugin_path) {
+  int fds[2];
+  if (pipe(fds) != 0) return -97;
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(fds[0]);
+    void *h = dlopen(plugin_path, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) h = dlopen(plugin_path, RTLD_LAZY | RTLD_GLOBAL);
+    int v = -96;
+    if (h) {
+      int_fn f = (int_fn)dlsym(RTLD_DEFAULT, "dt_develop_blend_version");
+      if (!f) f = (int_fn)dlsym(h, "dt_develop_blend_version");
+      v = f ? f() : -95;
+    }
+    if (write(fds[1], &v, sizeof v) != sizeof v) _exit(2);
+    _exit(0);
+  }
+  close(fds[1]);
+  int v = -99;
+  ssize_t r = read(fds[0], &v, sizeof v);
+  close(fds[0]);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  return r == sizeof v ? v : -99;
+}
+
+/* darktable's built-in pipeline orders (dt_ioppr_get_iop_order_list_version), printed as
+ * "iopOrders":{"1":"op,inst,...",...}. Entry layout per src/common/iop_order.h. */
+typedef struct gl_t { void *data; struct gl_t *next; struct gl_t *prev; } gl_t;
+typedef struct { union { double f; int i; } o; char operation[20]; int instance; char name[25]; } order_entry_t;
+typedef gl_t *(*order_fn)(int);
+
+static void print_iop_orders(const char *plugin_path) {
+  int fds[2];
+  if (pipe(fds) != 0) { printf("{}"); return; }
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(fds[0]);
+    FILE *out = fdopen(fds[1], "w");
+    void *h = dlopen(plugin_path, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) h = dlopen(plugin_path, RTLD_LAZY | RTLD_GLOBAL);
+    order_fn f = h ? (order_fn)dlsym(RTLD_DEFAULT, "dt_ioppr_get_iop_order_list_version") : NULL;
+    fputc('{', out);
+    for (int v = 1; f && v <= 5; v++) {
+      gl_t *l = f(v);
+      if (v > 1) fputc(',', out);
+      fprintf(out, "\"%d\":\"", v);
+      int first = 1;
+      for (gl_t *n = l; n && n->data; n = n->next) {
+        order_entry_t *e = (order_entry_t *)n->data;
+        char op[21]; memcpy(op, e->operation, 20); op[20] = 0;
+        fprintf(out, "%s%s,%d", first ? "" : ",", op, e->instance);
+        first = 0;
+      }
+      fputc('"', out);
+    }
+    fputc('}', out);
+    fclose(out);
+    _exit(0);
+  }
+  close(fds[1]);
+  char buf[65536];
+  size_t len = 0;
+  ssize_t r;
+  while ((r = read(fds[0], buf + len, sizeof buf - 1 - len)) > 0) len += (size_t)r;
+  close(fds[0]);
+  buf[len] = 0;
+  int status = 0;
+  waitpid(pid, &status, 0);
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && len > 1 && buf[0] == '{' && buf[len - 1] == '}') fwrite(buf, 1, len, stdout);
+  else printf("{}");
+}
+
 static int has_suffix(const char *s, const char *suf) {
   size_t a = strlen(s), b = strlen(suf);
   return a >= b && strcmp(s + a - b, suf) == 0;
@@ -238,7 +340,18 @@ int main(int argc, char **argv) {
   if (!d) { perror(dir); return 1; }
   struct dirent *e;
   int first = 1;
-  printf("{\"introspectionApi\":%d,\"modules\":[", API_VERSION);
+  char probe_path[4096] = { 0 };
+  {
+    DIR *pd = opendir(dir);
+    struct dirent *pe;
+    while (pd && (pe = readdir(pd))) {
+      if (strncmp(pe->d_name, "libexposure.", 12) == 0) { snprintf(probe_path, sizeof probe_path, "%s/%s", dir, pe->d_name); break; }
+    }
+    if (pd) closedir(pd);
+  }
+  printf("{\"introspectionApi\":%d,\"blendVersion\":%d,\"iopOrders\":", API_VERSION, probe_path[0] ? probe_blend_version(probe_path) : -94);
+  if (probe_path[0]) print_iop_orders(probe_path); else printf("{}");
+  printf(",\"modules\":[");
   fflush(stdout);
   while ((e = readdir(d))) {
     const char *n = e->d_name;
