@@ -334,4 +334,3 @@ export class RawTherapeeEngine implements EngineAdapter {
     return { steps, warnings }
   }
 }
-
