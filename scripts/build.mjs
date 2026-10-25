@@ -53,8 +53,10 @@ const client = await build({
   platform: 'browser',
   format: 'cjs',
   target: 'es2022',
-  jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime', 'react-dom'],
+  jsx: 'transform',
+  jsxFactory: 'React.createElement',
+  jsxFragment: 'React.Fragment',
+  external: ['react', 'react-dom'],
   logLevel: 'warning',
   define: { __CHENGYING_VERSION__: JSON.stringify(pkg.version), 'process.env.NODE_ENV': '"production"' },
 })

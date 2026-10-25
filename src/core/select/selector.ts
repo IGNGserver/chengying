@@ -208,7 +208,15 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
       }).filter(s => s.members.length > 0)
       const remaining = target - chosen.length
       const totalW = segs.reduce((a, s) => a + s.weight, 0) || 1
-      const quotas = segs.map(s => ({ ...s, quota: Math.min(s.members.length, Math.max(remaining >= segs.length ? 1 : 0, Math.floor(remaining * s.weight / totalW))) }))
+      // Fewer picks than segments: one pick each for the most valuable segments.
+      // Rank by each segment's best candidate so the strongest frames still win.
+      const topSegments = new Set([...segs].sort((a, b) => (b.members[0]?.fused ?? 0) - (a.members[0]?.fused ?? 0)).slice(0, remaining).map(s => s.id))
+      const quotas = segs.map(s => ({
+        ...s,
+        quota: remaining >= segs.length
+          ? Math.min(s.members.length, Math.max(1, Math.floor(remaining * s.weight / totalW)))
+          : (topSegments.has(s.id) ? 1 : 0),
+      }))
       for (const s of quotas.sort((a, b) => b.weight - a.weight)) {
         for (let i = 0; i < s.quota && chosen.length < target; i++) {
           const c = mmrPick(s.members, perScene)
