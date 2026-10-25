@@ -38,7 +38,7 @@ export async function saveImage(img: FImage, path: string, format: 'jpeg' | 'tif
     const buf = new Uint16Array(n)
     for (let i = 0; i < n; i++) buf[i] = Math.round(toSrgb(img.data[i] as number) * 65535)
     let s = sharp(Buffer.from(buf.buffer), { raw: { width: img.width, height: img.height, channels: 3, premultiplied: false } }).toColourspace('rgb16')
-    s = format === 'tiff' ? s.tiff({ compression: 'deflate', bitdepth: 16 as never }) : s.png({ compressionLevel: 6 })
+    s = format === 'tiff' ? s.tiff({ compression: 'deflate' }) : s.png({ compressionLevel: 6 })
     await s.toFile(path)
     return
   }
