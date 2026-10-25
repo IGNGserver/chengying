@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without the v prefix'
+        required: true
+        type: string
+      release_type:
+        description: 'GitHub Release type; use release only for an explicit formal release'
+        required: true
+        type: choice
+        options:
+          - prerelease
+          - release
+        default: prerelease
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+            version="${INPUT_VERSION#v}"
+            release_type="$INPUT_RELEASE_TYPE"
+          else
+            version="${EVENT_REF_NAME#v}"
+            release_type='prerelease'
+          fi
+          if [[ "$release_type" == 'release' ]]; then
+            prerelease=false
+          else
+            prerelease=true
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "release_type=$release_type"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify version, tag, notes, and repository whitespace
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-version.py \
+            --version "$RELEASE_VERSION" \
+            --tag "$RELEASE_TAG"
+          test -s ".github/release-notes/${RELEASE_VERSION}.md"
+          git diff --check
+
+      - name: Build reproducible source plugin packages
+        id: package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/chengying-release"
+          bash scripts/package-plugin.sh "$RELEASE_VERSION" "$output_dir"
+          echo "artifact_dir=$output_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Render release body
+        id: notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TYPE: ${{ steps.meta.outputs.release_type }}
+        run: |
+          set -euo pipefail
+          output_path="$RUNNER_TEMP/chengying-release-body.md"
+          python3 scripts/render-release-body.py \
+            --version "$RELEASE_VERSION" \
+            --release-type "$RELEASE_TYPE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$output_path" \
+            --check
+          echo "body_path=$output_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: 澄影 ${{ steps.meta.outputs.tag }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          body_path: ${{ steps.notes.outputs.body_path }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.package.outputs.artifact_dir }}/*
