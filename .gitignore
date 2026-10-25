@@ -28,6 +28,7 @@ coverage/
 # Logs and local reports
 *.log
 reports/
+release-body.md
 
 # Host-specific temporary files
 *.tmp
