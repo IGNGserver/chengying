@@ -465,7 +465,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
       const { width: w, height: h } = img
       let s = (p.seed as number) >>> 0 || 1
       const rnd = (): number => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) / 4294967296) - 0.5 }
-      let noise = new Float32Array(w * h).map(() => rnd())
+      let noise: Float32Array = new Float32Array(w * h).map(() => rnd())
       if (p.size > 1) noise = gaussBlur(noise, w, h, p.size / 2)
       let max = 1e-6
       for (const v of noise) max = Math.max(max, Math.abs(v))

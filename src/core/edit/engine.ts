@@ -174,7 +174,11 @@ export class CatalogCache {
 }
 
 export function coverageOf(ops: OperationSpec[], extensions: string[], unsupported: string[]): Catalog['coverage'] {
-  const count = (s: ParamSchema): number => (s.type === 'object' && s.properties ? Object.values(s.properties).reduce((a, x) => a + count(x), 0) : 1)
+  const count = (s: ParamSchema): number => {
+    if (s.type === 'object' && s.properties) return Object.values(s.properties).reduce((a, x) => a + count(x), 0)
+    if (s.type === 'array' && s.items?.type === 'object') return count(s.items)
+    return 1
+  }
   return {
     operations: ops.length,
     parameters: ops.reduce((a, o) => a + count(o.params), 0),
