@@ -1,0 +1,15 @@
+# 澄影 Chengying bundle layer. Override `config` in your profile's
+# cordis.patch.yml to tune engines, concurrency, vision model and providers.
+- insert:
+    - id: chengying
+      name: 'chengying'
+      config:
+        editing:
+          maxConcurrent: 2
+        engines:
+          darktable:
+            enabled: true
+          rawtherapee:
+            enabled: true
+          builtin:
+            enabled: true

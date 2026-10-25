@@ -5,7 +5,7 @@
 Collaboration: solo
 Baseline: main
 Release: tag + Actions（`.github/workflows/release.yml`）；标签为 `v<SemVer>`，普通发布默认 prerelease，正式版必须显式选择 `release`
-Validation: `git diff --check`；`python3 scripts/verify-release-version.py --version "$(tr -d '[:space:]' < VERSION)"`；`python3 scripts/render-release-body.py --version "$(tr -d '[:space:]' < VERSION)" --release-type prerelease --repository IGNGserver/chengying --check`
+Validation: `git diff --check`；`python3 scripts/verify-release-version.py --version "$(tr -d '[:space:]' < VERSION)"`；`python3 scripts/render-release-body.py --version "$(tr -d '[:space:]' < VERSION)" --release-type prerelease --repository IGNGserver/chengying --check`；`pnpm typecheck`；`pnpm test`（依赖装在本机 `$BUILD_SCRATCH_ROOT`，或由 PR 上的 CI 执行）
 Worktree: `~/项目/.wt/影视后期插件/<slug>`
 
 ## 项目定位
@@ -27,7 +27,7 @@ Worktree: `~/项目/.wt/影视后期插件/<slug>`
 - 只有明确要求正式版时，才在 GitHub Actions 的 `workflow_dispatch` 中将 `release_type` 选择为 `release`；正式版不会自动随 PR 合并产生。
 - 每个版本的手写更新说明放在 `.github/release-notes/<version>.md`，文件名不带 `v`；没有对应说明时，Release 工作流必须失败。
 - `.github/RELEASE_TEMPLATE.md` 只负责结构；Release 正文由工作流使用当前版本说明生成，不能把历次版本说明累积到模板中。
-- 当前工作流发布可复现的源码插件包（zip 与 tar.gz）。DeepSeek Harness 的宿主专用打包格式确定后，必须在 `scripts/package-plugin.sh`、Release 说明和验证命令中同步登记。
+- 当前工作流发布可复现的源码插件包（zip 与 tar.gz）和可安装的 DSH 插件包 `chengying-<version>.tgz`（`pnpm pack` 产物，含构建后的 `lib/`，用 `dsh plugin --profile <name> add <tgz>` 安装）；插件包在 Release 工作流中经类型检查与单元测试后生成。
 
 ## 发布操作
 
@@ -40,6 +40,8 @@ Worktree: `~/项目/.wt/影视后期插件/<slug>`
 
 - 插件源码、开发脚本、测试与文档分层组织；新增目录时保持命名清晰，并在 README 中补充用途。
 - 依赖版本、DeepSeek Harness API 约束、目标平台和安装方式一旦确定，必须在本文件或对应文档中登记，并同步更新 Validation 与 Release 工作流。
+- 技术栈：TypeScript（Node ≥ 24.9，`node:sqlite`）、esbuild 打包、vitest；运行依赖 sharp（libvips）与 exiftool-vendored；宿主 DSH 0.2.x（`dsh.bundle` + `dsh.client`）。darktable / RawTherapee 为可选引擎，引擎测试 `pnpm test:engines` 与 DSH 端到端 `pnpm test:dsh` 需本机引擎/宿主运行时，不在 CI 中运行。
+- 架构与引擎接口覆盖见 `docs/architecture.md`、`docs/engine-coverage.md`；引擎升级后用 `chengying engines verify <engine>` 重新生成覆盖报告并更新 `docs/coverage/`。
 - 影视素材、缓存、导出包、本地宿主安装目录和凭据不属于源码，禁止提交到仓库。
 
 ## 质量与安全

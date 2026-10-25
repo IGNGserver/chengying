@@ -1,0 +1,62 @@
+name: CI
+
+# Heavy work only on pull requests (Actions minutes are a monthly budget).
+# Engine tests (darktable / RawTherapee) and the DSH end-to-end suite need
+# locally installed engines / a Harness runtime and run on developer machines.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'native/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'vitest*.ts'
+      - 'VERSION'
+      - '.github/release-notes/**'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Repository checks
+        run: |
+          git diff --check "origin/${{ github.base_ref }}...HEAD"
+          python3 scripts/verify-release-version.py --version "$(tr -d '[:space:]' < VERSION)"
+          python3 scripts/render-release-body.py --version "$(tr -d '[:space:]' < VERSION)" --release-type prerelease --repository "$GITHUB_REPOSITORY" --check
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Unit and integration tests
+        run: pnpm test
