@@ -35,7 +35,6 @@ ${opts.extraRows ?? ''}`)
         DEEPSEEK_API_KEY: 'mock-key',
         DEEPSEEK_BASE_URL: opts.baseUrl,
         DSH_TELEMETRY_MODE: 'DISABLED',
-        DSH_PERMISSION_MODE: 'full-access',
         NO_COLOR: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],

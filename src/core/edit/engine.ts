@@ -91,6 +91,10 @@ export interface RenderRequest {
   orientation?: number | null
   /** Path guard for auxiliary files an operation reads (LUTs, profiles). */
   readable?: (path: string) => string
+  /** Set for previews: the long edge the final image is shown at (stages after the first may still enlarge). */
+  previewEdge?: number
+  /** Long edge of the full-resolution source, so later stages can scale pixel-sized parameters on previews. */
+  fullEdge?: number
 }
 
 export interface RenderResult {

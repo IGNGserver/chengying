@@ -63,6 +63,7 @@ function keySchema(section: string, key: string, def: string): ParamSchema {
     case 'boolean': return { ...base, type: 'boolean', default: def === 'true' }
     case 'number': {
       const s: ParamSchema = { ...base, type: 'number', default: Number(def) }
+      if (Number.isInteger(Number(def)) && h?.description === undefined) s.description = 'integral default: RawTherapee stores some of these as integers (fractions are rounded on retry)'
       if (h?.min !== undefined) s.minimum = h.min
       if (h?.max !== undefined) s.maximum = h.max
       return s
@@ -269,14 +270,39 @@ export class RawTherapeeEngine implements EngineAdapter {
     args.push('-c', req.input)
     const slot = await this.acquire(req.signal)
     try {
-      const r = await run(this.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, env: rtEnv(join(this.opts.workDir, `settings-${slot}`)), cwd: req.scratchDir })
+      let r = await run(this.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, env: rtEnv(join(this.opts.workDir, `settings-${slot}`)), cwd: req.scratchDir })
+      const extraWarnings: string[] = []
+      if (!existsSync(out) && /not found/.test(r.stderr + r.stdout)) {
+        // RawTherapee rejects the whole profile when an integer key holds a fraction;
+        // round keys whose default is integral and retry once.
+        const rounded: string[] = []
+        for (const [section, keys] of profile) {
+          const op = catalog.operations.find(o => o.id === section)
+          for (const [k, v] of keys) {
+            const m = /^(.+?)(_\d+)?$/.exec(k)
+            const sch = section === 'Locallab' && m?.[2] !== undefined ? op?.params.properties?.spots?.items?.properties?.[m[1] as string] : op?.params.properties?.[k]
+            if (sch?.type === 'number' && Number.isInteger(Number(sch.default)) && /^-?\d+\.\d+$/.test(v)) { keys.set(k, String(Math.round(Number(v)))); rounded.push(`${section}.${k}`) }
+          }
+        }
+        if (rounded.length > 0) {
+          writeFileSync(ppPath, writePp3(profile))
+          r = await run(this.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, env: rtEnv(join(this.opts.workDir, `settings-${slot}`)), cwd: req.scratchDir })
+          extraWarnings.push(`rounded integer parameters: ${rounded.join(', ')}`)
+        }
+      }
       if (!existsSync(out)) throw new ChengyingError('engine-failed', `rawtherapee-cli failed (${r.code}): ${(r.stderr || r.stdout).split('\n').slice(-10).join('\n')}`, { recipe: ppPath })
       const info = await sharp(out).metadata()
-      const warnings = (r.stdout + r.stderr).split('\n').filter(l => /error|warning|cannot|failed/i.test(l)).slice(0, 10)
+      const warnings = [...extraWarnings, ...(r.stdout + r.stderr).split('\n').filter(l => /error|warning|cannot|failed/i.test(l)).slice(0, 10)]
       return { output: out, width: info.width ?? 0, height: info.height ?? 0, durationMs: r.durationMs, warnings, recipe: { path: ppPath, format: 'rawtherapee-pp3' }, command: [this.cli, ...args] }
     } finally {
       this.slots[slot] = false
     }
+  }
+
+  /** Run a profile on the probe image and return the complete profile RawTherapee actually used (-O). */
+  async dumpProfile(stage: EditStage, catalog: Catalog, signal?: AbortSignal): Promise<Pp3> {
+    if ((await this.probe()).available !== true) throw new ChengyingError('engine-unavailable', 'RawTherapee unavailable')
+    return await this.dump(`verify-${newId('v')}`, writePp3(this.buildProfile(stage, catalog)), signal)
   }
 
   async importRecipe(text: string, catalog: Catalog): Promise<{ steps: EditStep[]; warnings: string[] }> {

@@ -23,7 +23,9 @@ import { run } from '../../../util/proc.ts'
 import { ChengyingError, errorMessage } from '../../../util/errors.ts'
 import { newId, nowIso } from '../../../util/misc.ts'
 
-const CATALOG_VERSION = 4
+const CATALOG_VERSION = 5
+/** Modules the export pipeline inserts itself and drops from any supplied history (output size comes from the render request). */
+const PIPELINE_INTERNAL = new Set(['finalscale'])
 const FLAGS = { blending: 1 << 1, deprecated: 1 << 2, hidden: 1 << 5, oneInstance: 1 << 7, noHistory: 1 << 9, noMasks: 1 << 10 }
 const GROUPS: Array<[number, string]> = [[1, 'basic'], [2, 'tone'], [4, 'color'], [8, 'correct'], [16, 'effect'], [32, 'technical'], [64, 'grading'], [128, 'effects']]
 
@@ -154,6 +156,7 @@ export class DarktableEngine implements EngineAdapter {
         multiInstance: (flags & FLAGS.oneInstance) === 0,
         deprecated: (flags & FLAGS.deprecated) !== 0,
         hidden: (flags & FLAGS.hidden) !== 0 || (flags & FLAGS.noHistory) !== 0,
+        tags: PIPELINE_INTERNAL.has(m.operation) ? ['pipeline-internal'] : undefined,
         docsUrl: m.docUrl ?? `https://docs.darktable.org/usermanual/stable/en/module-reference/processing-modules/${m.operation}/`,
         native: { module: m, flags, blendCs: blendColorspaceFor(m.defaultColorspace), paramsSize: m.paramsSize },
       }
@@ -205,6 +208,7 @@ export class DarktableEngine implements EngineAdapter {
     }
     const v = validateWithCatalog(step, catalog, { fill: true })
     const op = catalog.operations.find(o => o.id === v.step.op) as OperationSpec
+    if (op.tags?.includes('pipeline-internal')) throw new ChengyingError('unsupported', `${op.id} is inserted by darktable's export pipeline and cannot be set through history; control output size with the render/export maxEdge`)
     if ((step.instance ?? 0) > 0 && !op.multiInstance) throw new ChengyingError('invalid-argument', `${op.id} allows only one instance`)
     if (step.mask !== undefined) {
       if (step.mask.shapes !== undefined && step.mask.shapes.length > 0 && !op.masks.includes('drawn')) throw new ChengyingError('unsupported', `${op.id} does not support drawn masks`)

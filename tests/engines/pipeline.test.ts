@@ -55,6 +55,13 @@ describe.skipIf(!enabled)('RAW pipelines through real engines', () => {
       const tif = await exportPhotos(project, edit, { taskIds: [task?.id as string], subdir: `${engine}-tif`, format: 'tiff', maxEdge: 800 })
       expect(tif.items[0]?.verified).toBe(true)
       expect((await sharp(tif.items[0]?.path as string).metadata()).depth).toBe('ushort')
+      // Pixel content: the 16-bit TIFF and the JPEG export show the same picture.
+      const small = async (p: string): Promise<Buffer> => await sharp(p).resize(64, 80, { fit: 'fill' }).toColourspace('srgb').removeAlpha().raw().toBuffer()
+      const a = await small(jpg.items[0]?.path as string)
+      const b = await small(tif.items[0]?.path as string)
+      let diff = 0
+      for (let i = 0; i < a.length; i++) diff += Math.abs((a[i] as number) - (b[i] as number))
+      expect(diff / a.length).toBeLessThan(6)
     })
   }
 })

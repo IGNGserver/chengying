@@ -90,7 +90,8 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
       const src = edit.sourceFor(shot, (await edit.engines.get(engine).probe()).inputs.raw ? kind : 'raster')
       doc = { schema: 1, sourceFile: src.fileId, stages: [{ id: 'default', engine, steps: [] }] }
     }
-    const generative = doc.provenance?.generative === true || doc.stages.some(s => s.steps.some(st => st.enabled && /^gen_|generative|outpaint|inpaint_generative/.test(st.op)))
+    // Generated pixels in the rendered result (a removed/disabled layer no longer counts).
+    const generative = doc.stages.some(s => s.steps.some(st => st.enabled && /^gen_/.test(st.op)))
     const source = project.repo.file(doc.sourceFile)
     const base = (opts.naming === 'datetime' && shot.captureTime !== null ? shot.captureTime.replace(/[-:]/g, '').replace('T', '_').slice(0, 15) : basename(source?.path ?? shot.id, extname(source?.path ?? '')))
     let target = join(dir, `${base}.${ext}`)

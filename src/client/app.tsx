@@ -25,7 +25,7 @@ const T: Record<Lang, Record<string, string>> = {
     status: '状态', engine: '引擎', attempts: '尝试', pause: '暂停', resume: '恢复', retry: '重试', cancel: '取消',
     revisions: '修订历史', before: '原图', after: '修图后', compare: '对比', steps: '操作步骤', events: '执行记录', usage: '模型用量',
     tokensIn: '输入 tokens', tokensOut: '输出 tokens', calls: '调用', images: '图片', verified: '元数据已验证', notVerified: '元数据未通过',
-    authorizations: '生成式修改授权', grant: '授权', revoke: '撤销', authNote: '生成式修改会改变照片真实性，只在你明确授权后执行。',
+    authorizations: '生成式修改授权', grant: '授权生成式修改', grantScope: '本工作区 24 小时内最多 10 次', grantConfirm: '允许 AI 对本工作区的照片做生成式修改（会产生非拍摄所得的像素，导出时会标注）？', revoke: '撤销', authNote: '生成式修改会改变照片真实性，只在你明确授权后执行。',
     groups: '分组', duplicates: '近似重复组', scenes: '场景', segments: '行程段落', detail: '详情', close: '关闭', error: '错误',
     runCull: '自动筛图（扫描·预览·评分·分组）', rerunCull: '强制重算', lang: 'EN', emptyTasks: '暂无修图任务。在对话中让 Agent 对选片创建修图任务（edit_tasks_create）。', emptyExports: '暂无导出。',
   },
@@ -40,7 +40,7 @@ const T: Record<Lang, Record<string, string>> = {
     status: 'Status', engine: 'Engine', attempts: 'Attempts', pause: 'Pause', resume: 'Resume', retry: 'Retry', cancel: 'Cancel',
     revisions: 'Revisions', before: 'Original', after: 'Edited', compare: 'Compare', steps: 'Steps', events: 'Execution log', usage: 'Model usage',
     tokensIn: 'Input tokens', tokensOut: 'Output tokens', calls: 'Calls', images: 'Images', verified: 'Metadata verified', notVerified: 'Metadata check failed',
-    authorizations: 'Generative-edit authorizations', grant: 'Authorize', revoke: 'Revoke', authNote: 'Generative edits change photo authenticity and run only with your explicit authorization.',
+    authorizations: 'Generative-edit authorizations', grant: 'Authorize generative edits', grantScope: 'this workspace, 24 h, up to 10 edits', grantConfirm: 'Allow AI to make generative edits to photos of this workspace (pixels not captured by the camera; exports are labelled)?', revoke: 'Revoke', authNote: 'Generative edits change photo authenticity and run only with your explicit authorization.',
     groups: 'Groups', duplicates: 'Near-duplicate groups', scenes: 'Scenes', segments: 'Trip segments', detail: 'Detail', close: 'Close', error: 'Error',
     runCull: 'Run culling (scan · previews · scores · groups)', rerunCull: 'Recompute', lang: '中', emptyTasks: 'No retouch tasks yet. Ask the agent to create them for a selection (edit_tasks_create).', emptyExports: 'No exports yet.',
   },
@@ -429,6 +429,13 @@ function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.
       )}
       <h4>{t.authorizations}</h4>
       <div className="cy-small cy-muted">{t.authNote}</div>
+      <div className="cy-row cy-small">
+        <button className="cy-btn" onClick={() => {
+          if (!window.confirm(t.grantConfirm)) return
+          void api(`/p/${pid}/authorizations`, { method: 'POST', body: { hours: 24, maxUses: 10, note: 'web panel' } }).then(() => auth.reload())
+        }}>{t.grant}</button>
+        <span className="cy-muted">{t.grantScope}</span>
+      </div>
       {(auth.data?.authorizations ?? []).map(a => (
         <div key={a.id} className={`cy-row cy-small${a.revoked ? ' cy-dim' : ''}`}>
           <span>{a.scope}</span><span className="cy-muted">{a.shotId ?? '*'} · {a.note} · {a.uses}/{a.maxUses ?? '∞'}</span>

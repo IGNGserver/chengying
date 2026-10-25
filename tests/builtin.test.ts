@@ -114,3 +114,27 @@ describe('built-in engine', () => {
     expect(() => engine.validateStep(st('crop', {}, { mask: { shapes: [] } }), catalog)).toThrow(/does not support masks/)
   })
 })
+
+describe('float image I/O', () => {
+  it('round-trips 16-bit TIFF/PNG and 8-bit JPEG without corrupting pixels', async () => {
+    const { saveImage, loadImage } = await import('../src/core/edit/engines/builtin/image.ts')
+    const { freshDir } = await import('./helpers/fixtures.ts')
+    const dir = await freshDir('io')
+    const w = 97; const h = 61
+    const data = new Float32Array(w * h * 3)
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3
+      data[i] = x / w; data[i + 1] = y / h; data[i + 2] = ((x * 7 + y * 3) % 50) / 50
+    }
+    const img = { width: w, height: h, data }
+    for (const [fmt, depth, tol] of [['tiff', 16, 0.001], ['png', 16, 0.001], ['png', 8, 0.01], ['jpeg', 8, 0.06]] as const) {
+      const p = `${dir}/io-${fmt}-${depth}.${fmt === 'jpeg' ? 'jpg' : fmt === 'tiff' ? 'tif' : 'png'}`
+      await saveImage(img, p, fmt, 95, depth)
+      const back = await loadImage(p)
+      expect([back.width, back.height]).toEqual([w, h])
+      let err = 0
+      for (let i = 0; i < data.length; i++) err += Math.abs((back.data[i] as number) - (data[i] as number))
+      expect(err / data.length, `${fmt}/${depth}`).toBeLessThan(tol)
+    }
+  })
+})

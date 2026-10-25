@@ -214,6 +214,47 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
       return { events: P(p.id as string).repo.events({ taskId: req.query.get('task') ?? undefined, afterId: after ? Number(after) : undefined, limit: Number(req.query.get('limit') ?? 200) }) }
     })
     .add('GET', '/p/:id/usage', async (p) => ({ usage: P(p.id as string).repo.usageSummary() }))
+    .add('GET', '/engines', async () => ({ engines: await rt.engines().probeAll() }))
+    .add('GET', '/p/:id/tasks', async (p, req) => {
+      const status = req.query.get('status')
+      return { tasks: P(p.id as string).repo.tasks(status ? { status: [status as never] } : {}) }
+    })
+    .add('GET', '/p/:id/task/:task', async (p) => {
+      const project = P(p.id as string)
+      const task = project.repo.task(p.task as string)
+      if (task === undefined) throw new ChengyingError('not-found', 'no such task')
+      return { task, revisions: project.repo.revisions(task.id), events: project.repo.events({ taskId: task.id, limit: 400 }) }
+    })
+    .add('POST', '/p/:id/task/:task/control', async (p, req) => {
+      const action = (req.body as { action?: string } | undefined)?.action
+      if (!['pause', 'resume', 'retry', 'cancel'].includes(String(action))) throw new ChengyingError('invalid-argument', 'action must be pause|resume|retry|cancel')
+      return await rt.orchestrator.control(P(p.id as string), p.task as string, action as 'pause')
+    })
+    .add('GET', '/p/:id/render/:rev', async (p, _req, res) => {
+      const project = P(p.id as string)
+      const rev = project.repo.revision(p.rev as string)
+      if (rev === undefined) throw new ChengyingError('not-found', 'no such revision')
+      let path = rev.previewPath
+      if (path === null || !existsSync(path)) path = (await rt.edit(project).render(rev.taskId, { revisionId: rev.id, maxEdge: rt.config.editing.previewEdge })).path
+      await sendFile(project, res, path)
+    })
+    .add('GET', '/p/:id/export-file/:exp', async (p, _req, res) => {
+      const project = P(p.id as string)
+      await sendFile(project, res, project.repo.exports().find(e => e.id === p.exp)?.path)
+    })
+    .add('GET', '/p/:id/authorizations', async (p) => ({ authorizations: P(p.id as string).repo.authorizations() }))
+    .add('POST', '/p/:id/authorizations', async (p, req) => {
+      // User-only action: grants come from the browser (authenticated Harness user), never from a tool.
+      const body = (req.body ?? {}) as { shotId?: string; note?: string; maxUses?: number; hours?: number }
+      const project = P(p.id as string)
+      const id = project.repo.addAuthorization({ scope: 'generative', shotId: body.shotId ?? null, taskId: null, grantedBy: 'user (web panel)', note: body.note ?? '', expiresAt: new Date(Date.now() + (body.hours ?? 24) * 3600_000).toISOString(), maxUses: body.maxUses ?? null })
+      project.repo.addEvent(null, 'info', 'authorization', `generative edits authorized${body.shotId ? ` for ${body.shotId}` : ''} by the user`, { id })
+      return { id }
+    })
+    .add('POST', '/p/:id/authorizations/:auth/revoke', async (p) => {
+      P(p.id as string).repo.revokeAuthorization(p.auth as string)
+      return { revoked: true }
+    })
     .add('GET', '/p/:id/exports', async (p) => ({ exports: P(p.id as string).repo.exports() }))
   return router
 }

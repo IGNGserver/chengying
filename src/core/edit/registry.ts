@@ -4,12 +4,14 @@ import type { Catalog, EngineAdapter, EngineProbe } from './engine.ts'
 import { DarktableEngine } from './engines/darktable/index.ts'
 import { RawTherapeeEngine } from './engines/rawtherapee/index.ts'
 import { BuiltinEngine } from './engines/builtin/index.ts'
+import { AiEngine, type AiEngineOptions } from './engines/ai/index.ts'
 import { ChengyingError } from '../util/errors.ts'
 
 export interface EngineSettings {
   darktable?: { enabled?: boolean; path?: string }
   rawtherapee?: { enabled?: boolean; path?: string }
   builtin?: { enabled?: boolean }
+  ai?: { enabled?: boolean } & Omit<AiEngineOptions, 'workDir'>
   preferred?: 'auto' | 'darktable' | 'rawtherapee' | 'builtin'
   maxParallel?: number
 }
@@ -22,6 +24,7 @@ export class EngineRegistry {
     if (settings.darktable?.enabled !== false) this.engines.set('darktable', new DarktableEngine({ cli: settings.darktable?.path, workDir: join(workDir, 'darktable'), maxParallel: settings.maxParallel }))
     if (settings.rawtherapee?.enabled !== false) this.engines.set('rawtherapee', new RawTherapeeEngine({ cli: settings.rawtherapee?.path, workDir: join(workDir, 'rawtherapee'), maxParallel: settings.maxParallel }))
     if (settings.builtin?.enabled !== false) this.engines.set('builtin', new BuiltinEngine())
+    if (settings.ai?.enabled !== false) this.engines.set('ai', new AiEngine({ ...settings.ai, workDir: join(workDir, 'ai') }))
   }
 
   /** Register an additional adapter (extensions, tests). */

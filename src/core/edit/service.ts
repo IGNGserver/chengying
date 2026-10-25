@@ -12,6 +12,11 @@ import type { Project } from '../project.ts'
 import type { EngineRegistry } from './registry.ts'
 import type { EditDocument, EditStage, EditStep, MaskSpec, RevisionRecord, Shot, TaskRecord, TaskStatus } from '../types.ts'
 import { mergeParams } from './schema.ts'
+import { generateWith, type GenerativeProvider } from './generative.ts'
+import { loadImage, saveImage } from './engines/builtin/image.ts'
+import { rasterizeMask } from './engines/builtin/masks.ts'
+import { styleFingerprint, type StyleFingerprint } from './engines/ai/classical.ts'
+import { loadAsset, writeMaskPng } from './engines/ai/index.ts'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
 import { newId, nowIso, round } from '../util/misc.ts'
 
@@ -26,6 +31,7 @@ export type EditOp =
   | { op: 'set_source'; source: 'raw' | 'raster' }
   | { op: 'import_recipe'; stage?: string | number; text?: string; path?: string; format?: string; replace?: boolean }
   | { op: 'reset'; stage?: string | number }
+  | { op: 'set_provenance'; generative?: boolean; authorization?: string; note?: string }
 
 export interface ImageStats {
   width: number
@@ -83,6 +89,9 @@ export async function imageStats(path: string): Promise<ImageStats> {
 }
 
 export class EditService {
+  /** Default render-time authorization check (generative layers); set by the host. */
+  authorize: ((engine: string, step: EditStep) => Promise<string | undefined>) | undefined
+
   constructor(readonly project: Project, readonly engines: EngineRegistry) {}
 
   private task(id: string): TaskRecord {
@@ -265,6 +274,15 @@ export class EditService {
           summary.push(`import ${imported.steps.length} steps`)
           break
         }
+        case 'set_provenance': {
+          const pv = doc.provenance ?? {}
+          if (o.generative !== undefined) pv.generative = o.generative
+          if (o.authorization !== undefined) pv.authorizationIds = [...new Set([...(pv.authorizationIds ?? []), o.authorization])]
+          if (o.note !== undefined) pv.notes = [...(pv.notes ?? []), o.note]
+          doc.provenance = pv
+          summary.push('provenance')
+          break
+        }
         case 'reset': {
           const targets = o.stage === undefined ? doc.stages : [doc.stages[this.stageIndex(doc, o.stage)] as EditStage]
           for (const s of targets) s.steps = []
@@ -355,10 +373,11 @@ export class EditService {
           inputKind = 'raster'
           warnings.push(`${stage.engine} cannot read RAW; developed from ${alt !== undefined ? 'the camera JPEG' : 'the embedded preview'}`)
         }
-        if (opts.authorize !== undefined) {
+        const authorize = opts.authorize ?? this.authorize
+        if (authorize !== undefined) {
           for (const s of stage.steps) {
             if (!s.enabled) continue
-            const denial = await opts.authorize(stage.engine, s)
+            const denial = await authorize(stage.engine, s)
             if (denial !== undefined) throw new ChengyingError('authorization-required', denial, { step: s.id, op: s.op })
           }
         }
@@ -369,6 +388,7 @@ export class EditService {
           input, inputKind, stage, output: out, format: last ? format : 'tiff', bitDepth: last ? opts.bitDepth : 16,
           maxEdge: i === 0 ? edge : undefined, quality: opts.quality, scratchDir: scratch, signal: opts.signal,
           orientation: file.meta.orientation ?? null, readable: (p: string) => this.project.guard.readable(p),
+          previewEdge: edge, fullEdge: Math.max(shot.width ?? file.meta.width ?? 0, shot.height ?? file.meta.height ?? 0) || undefined,
         }, cat)
         warnings.push(...r.warnings.map(w => `${stage.engine}: ${w}`))
         stages.push({ engine: stage.engine, durationMs: r.durationMs, recipe: r.recipe?.path })
@@ -429,6 +449,62 @@ export class EditService {
       n++
     }
     return n
+  }
+
+  /** Style fingerprint of a photo's current look: its task head when edited, else the original preview. */
+  async styleReference(ref: { shotId?: string; taskId?: string }, signal?: AbortSignal): Promise<{ fingerprint: StyleFingerprint; source: string; shotId: string }> {
+    let taskId = ref.taskId
+    let shotId = ref.shotId
+    if (taskId === undefined && shotId !== undefined) taskId = this.project.repo.tasks().find(t => t.shotId === shotId && t.status !== 'cancelled')?.id
+    let path: string
+    if (taskId !== undefined) {
+      const t = this.task(taskId)
+      shotId = t.shotId
+      path = (await this.render(taskId, { maxEdge: 1024, signal })).path
+    } else {
+      const shot = shotId === undefined ? undefined : this.project.repo.shot(shotId)
+      if (shot?.previewPath == null) throw new ChengyingError('not-found', `no preview for ${shotId ?? '(no shot given)'}`)
+      path = shot.previewPath
+    }
+    const fp = styleFingerprint(await loadImage(path, 1024))
+    const r = (v: number): number => Math.round(v * 1000) / 1000
+    return { fingerprint: { mean: fp.mean.map(r) as StyleFingerprint['mean'], std: fp.std.map(r) as StyleFingerprint['std'], quantiles: fp.quantiles.map(r) }, source: taskId !== undefined ? `task ${taskId} head` : 'original preview', shotId: shotId as string }
+  }
+
+  /**
+   * Run a generative provider ONCE on the current head render and record the
+   * result as a gen_layer step of the AI stage (added when missing). Callers
+   * must have checked the user's authorization; its id is stored in the step
+   * and in the document provenance.
+   */
+  async generate(taskId: string, opts: { provider: GenerativeProvider; kind: string; prompt: string; mask?: MaskSpec; authorizationId: string; author: string; maxEdge?: number; signal?: AbortSignal; message?: string }): Promise<{ revision: RevisionRecord; asset: string; warnings: string[]; provider: Record<string, unknown> }> {
+    const base = await this.render(taskId, { maxEdge: opts.maxEdge ?? 2048, format: 'png', signal: opts.signal })
+    const dir = this.project.guard.writable(this.project.path('assets', taskId))
+    mkdirSync(dir, { recursive: true })
+    const scratch = this.project.path('scratch', 'gen', newId('g'))
+    mkdirSync(scratch, { recursive: true })
+    try {
+      const img = await loadImage(base.path)
+      let maskPath: string | undefined
+      if (opts.mask !== undefined) {
+        maskPath = join(scratch, 'mask.png')
+        await writeMaskPng(rasterizeMask({ ...opts.mask, opacity: 1 }, img), img.width, img.height, maskPath)
+      }
+      const out = await generateWith(opts.provider, { image: base.path, mask: maskPath, prompt: opts.prompt, kind: opts.kind, width: img.width, height: img.height, outDir: scratch, signal: opts.signal })
+      // Normalise to the render size so the layer registers with the photo.
+      const asset = join(dir, `${newId('gen')}.png`)
+      await saveImage(await loadAsset(out.path, img.width, img.height), asset, 'png', 92, 16)
+      const head = this.head(taskId)
+      const ops: EditOp[] = []
+      if (!head.doc.stages.some(st => st.engine === 'ai')) ops.push({ op: 'add_stage', engine: 'ai' })
+      ops.push({ op: 'add_step', stage: 'ai', step: { op: 'gen_layer', params: { asset, kind: opts.kind, prompt: opts.prompt, provider: opts.provider.id, authorization: opts.authorizationId }, ...(opts.mask !== undefined ? { mask: opts.mask } : {}), label: `${opts.kind}: ${opts.prompt.slice(0, 40)}` } })
+      ops.push({ op: 'set_provenance', generative: true, authorization: opts.authorizationId, note: `${opts.kind} via ${opts.provider.id} (${opts.provider.type}): ${opts.prompt.slice(0, 120)}` })
+      const { revision, warnings } = await this.applyOps(taskId, ops, { author: opts.author, message: opts.message ?? `generative ${opts.kind} via ${opts.provider.id}`, signal: opts.signal })
+      this.project.repo.addEvent(taskId, 'info', 'generative', `generated ${opts.kind} layer with ${opts.provider.id}`, { asset, authorization: opts.authorizationId, prompt: opts.prompt, provider: out.detail })
+      return { revision, asset, warnings, provider: out.detail }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
   }
 
   summary(taskId: string): Record<string, unknown> {

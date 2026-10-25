@@ -7,7 +7,7 @@ import sharp from 'sharp'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { Config } from './config.ts'
-import type { AgentLike, AttachmentsService, HostContext, JobsService, LlmService, ToolRunContext } from './host-types.ts'
+import type { AgentLike, ApprovalService, AttachmentsService, HostContext, JobsService, LlmService, ToolRunContext } from './host-types.ts'
 import type { ToolImage } from './tool.ts'
 import { Project, defaultStateRoot, projectIdFor } from '../core/project.ts'
 import { isInside } from '../core/fsguard.ts'
@@ -15,6 +15,10 @@ import { ChengyingError, errorMessage } from '../core/util/errors.ts'
 import { chunk, newId, nowIso, round } from '../core/util/misc.ts'
 import { buildVlmPrompt, parseVlmResponse, type VlmItem } from '../core/analysis/vlm.ts'
 import { mergeDims } from '../core/select/selector.ts'
+import { EngineRegistry } from '../core/edit/registry.ts'
+import { EditService } from '../core/edit/service.ts'
+import type { EditStep } from '../core/types.ts'
+import type { EditOrchestrator } from './orchestrator.ts'
 import type { Shot } from '../core/types.ts'
 
 export interface Activity {
@@ -39,6 +43,10 @@ export type Log = { info(...a: unknown[]): void; warn(...a: unknown[]): void; er
 export class ChengyingRuntime {
   /** HTTP router (set when the web server is mounted). */
   router!: import('./http.ts').ApiRouter
+  /** Editing sub-agent orchestration (set by the plugin entry). */
+  orchestrator!: EditOrchestrator
+  private registryInstance: EngineRegistry | undefined
+  private readonly editServices = new Map<string, EditService>()
   readonly projects = new Map<string, Project>()
   readonly activities = new Map<string, Activity>()
   private readonly current = new Map<string, string>()
@@ -114,6 +122,96 @@ export class ChengyingRuntime {
 
   bindAgent(agentId: string, projectId: string): void {
     this.current.set(agentId, projectId)
+  }
+
+  /* ------------------------------------------------------------ editing */
+
+  stateRoot(): string {
+    return resolve(this.config.stateRoot ?? defaultStateRoot())
+  }
+
+  scratchRoot(): string {
+    const d = join(this.stateRoot(), 'scratch')
+    mkdirSync(d, { recursive: true })
+    return d
+  }
+
+  engines(): EngineRegistry {
+    this.registryInstance ??= new EngineRegistry(join(this.stateRoot(), 'engines'), {
+      darktable: this.config.engines.darktable,
+      rawtherapee: this.config.engines.rawtherapee,
+      builtin: this.config.engines.builtin,
+      ai: { enabled: this.config.engines.ai?.enabled, superResolution: this.config.superResolution, commands: this.config.aiOperations, providers: this.config.generative.providers.map(p => ({ id: p.id, type: p.type, model: p.model })) },
+      preferred: this.config.defaultEngine,
+      maxParallel: Math.max(2, this.config.editing.maxConcurrent),
+    })
+    return this.registryInstance
+  }
+
+  edit(project: Project): EditService {
+    let svc = this.editServices.get(project.id)
+    if (svc === undefined) {
+      svc = new EditService(project, this.engines())
+      svc.authorize = this.authorizer(project)
+      const recovered = svc.recover()
+      if (recovered > 0) this.log.info(`chengying: ${recovered} interrupted task(s) re-queued in ${project.root}`)
+      this.editServices.set(project.id, svc)
+    }
+    return svc
+  }
+
+  projectOrUndefined(agentId?: string): Project | undefined {
+    try { return this.project(undefined, agentId) } catch { return undefined }
+  }
+
+  /** Find the open project owning a task (tools may omit the project). */
+  projectOfTask(taskId: string, ref?: string, agentId?: string): Project {
+    if (ref !== undefined && ref !== '') return this.project(ref, agentId)
+    for (const p of this.projects.values()) if (p.repo.task(taskId) !== undefined) return p
+    throw new ChengyingError('not-found', `no open workspace has task ${taskId}`)
+  }
+
+  /**
+   * Render-time authorization check for steps that alter photo authenticity
+   * (generative operations of the AI stage). Returns a denial message, or
+   * undefined when the step may run.
+   */
+  authorizer(project: Project): (engine: string, step: EditStep) => Promise<string | undefined> {
+    return async (engine, step) => {
+      if (engine !== 'ai' || !step.op.startsWith('gen_')) return undefined
+      const id = typeof step.params.authorization === 'string' ? step.params.authorization : undefined
+      const grant = id === undefined ? undefined : project.repo.authorizations().find(a => a.id === id && a.scope === 'generative')
+      // The layer was generated under this grant; later expiry/revocation stops new generations, not existing layers.
+      return grant === undefined ? `"${step.op}" carries no valid generative authorization; generative layers are created only by edit_generate after the user authorizes` : undefined
+    }
+  }
+
+  /**
+   * Obtain (and consume one use of) a generative authorization for a shot:
+   * an existing user grant, the configured policy, or an interactive DSH
+   * approval prompt answered by the user. Never self-granted by an agent.
+   */
+  async acquireGenerative(project: Project, shotId: string, exec: ToolRunContext, reason: string): Promise<{ id: string; grantedBy: string }> {
+    const now = nowIso()
+    const grant = project.repo.authorizations().find(a => a.scope === 'generative' && !a.revoked && (a.shotId === null || a.shotId === shotId) && (a.expiresAt === null || a.expiresAt > now) && (a.maxUses === null || a.uses < a.maxUses))
+    if (grant !== undefined) {
+      project.repo.consumeAuthorization(grant.id)
+      return { id: grant.id, grantedBy: grant.grantedBy }
+    }
+    const create = (grantedBy: string): { id: string; grantedBy: string } => {
+      const id = project.repo.addAuthorization({ scope: 'generative', shotId, taskId: null, grantedBy, note: reason.slice(0, 500), expiresAt: null, maxUses: 1 })
+      project.repo.consumeAuthorization(id)
+      project.repo.addEvent(null, 'info', 'authorization', `generative edit on ${shotId} authorized (${grantedBy})`, { id })
+      return { id, grantedBy }
+    }
+    if (!this.config.generative.requireApproval) return create('policy: generative.requireApproval=false')
+    const approval = this.ctx.get('approval') as ApprovalService | undefined
+    if (approval !== undefined && exec.agent !== undefined) {
+      const decision = await approval.request({ agent: exec.agent, toolName: exec.name, callId: exec.callId, reason, displayReason: reason, signal: exec.signal })
+      if (decision === 'allowed-once') return create('user (DSH approval prompt)')
+      if (decision === 'rejected') throw new ChengyingError('authorization-required', 'the user declined this generative edit; keep the photo non-generative')
+    }
+    throw new ChengyingError('authorization-required', `generative edits on ${shotId} need the user's authorization: ask the user to grant it in the Chengying panel (Exports → Generative authorizations) or to approve gen_authorize`)
   }
 
   /* --------------------------------------------------------- activities */
@@ -354,6 +452,7 @@ export class ChengyingRuntime {
 
   async close(): Promise<void> {
     for (const c of this.controllers.values()) c.abort()
+    await this.registryInstance?.close()
     await Promise.all([...this.projects.values()].map(p => p.close()))
     this.projects.clear()
   }

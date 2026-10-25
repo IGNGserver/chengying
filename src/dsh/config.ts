@@ -4,6 +4,8 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import type { ModelConfig } from '../core/analysis/models.ts'
+import type { GenerativeProvider } from '../core/edit/generative.ts'
+import type { AiCommandOp } from '../core/edit/engines/ai/index.ts'
 
 export interface EngineSetting {
   enabled: boolean
@@ -11,16 +13,7 @@ export interface EngineSetting {
   path?: string
 }
 
-export interface GenerativeProviderSetting {
-  id: string
-  type: 'openai-images' | 'comfyui' | 'command'
-  url?: string
-  model?: string
-  apiKeyEnv?: string
-  command?: string
-  args?: string[]
-  workflow?: string
-}
+export type GenerativeProviderSetting = GenerativeProvider
 
 export interface Config {
   stateRoot?: string
@@ -33,7 +26,9 @@ export interface Config {
   backgroundThreshold: number
   vlm: { enabled: boolean; provider?: string; model?: string; batchSize: number; cell: number; maxShots: number; language: 'zh' | 'en'; maxTokens: number }
   models: ModelConfig[]
-  engines: { darktable: EngineSetting; rawtherapee: EngineSetting; builtin: EngineSetting }
+  engines: { darktable: EngineSetting; rawtherapee: EngineSetting; builtin: EngineSetting; ai: EngineSetting }
+  /** Extra deterministic image operations (external CLIs) exposed in the AI stage. */
+  aiOperations: AiCommandOp[]
   defaultEngine: 'auto' | 'darktable' | 'rawtherapee' | 'builtin'
   editing: {
     subagentProvider: string
@@ -45,7 +40,7 @@ export interface Config {
     childModel?: string
   }
   generative: { providers: GenerativeProviderSetting[]; requireApproval: boolean }
-  superResolution: { command?: string; args?: string[]; model?: string }
+  superResolution: { command?: string; args?: string[]; model?: string; timeoutMs?: number }
   ui: { enabled: boolean; basePath: string }
 }
 
@@ -76,7 +71,9 @@ export const Config: Schema<Config> = Schema.object({
     darktable: engine(),
     rawtherapee: engine(),
     builtin: engine(),
+    ai: engine(),
   }),
+  aiOperations: Schema.array(Schema.any()).default([]).description('External image operations for the AI stage: {id,title,description,command,args:[...{input} {output} {mask} {param.x}],params:<JSON schema>,maskable}.') as unknown as Schema<AiCommandOp[]>,
   defaultEngine: Schema.union(['auto', 'darktable', 'rawtherapee', 'builtin'] as const).default('auto'),
   editing: Schema.object({
     subagentProvider: Schema.string().default('spawn'),
@@ -87,13 +84,14 @@ export const Config: Schema<Config> = Schema.object({
     childModel: Schema.string(),
   }),
   generative: Schema.object({
-    providers: Schema.array(Schema.any()).default([]) as unknown as Schema<GenerativeProviderSetting[]>,
-    requireApproval: Schema.boolean().default(true),
+    providers: Schema.array(Schema.any()).default([]).description('Generative providers: {id,type:openai-images|comfyui|command,url,model,apiKeyEnv,command,args,workflow}. API keys are read from the named environment variable only.') as unknown as Schema<GenerativeProviderSetting[]>,
+    requireApproval: Schema.boolean().default(true).description('Require an explicit user authorization (panel grant or DSH approval prompt) before any generative edit.'),
   }),
   superResolution: Schema.object({
     command: Schema.string().description('External super-resolution CLI, e.g. realesrgan-ncnn-vulkan'),
     args: Schema.array(Schema.string()),
     model: Schema.string(),
+    timeoutMs: Schema.natural(),
   }),
   ui: Schema.object({
     enabled: Schema.boolean().default(true),
