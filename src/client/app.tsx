@@ -379,7 +379,7 @@ function TaskDetail({ pid, id, t, onClose }: { pid: string; id: string; t: Recor
   return (
     <div className="cy-drawer cy-wide">
       <div className="cy-row"><b>{task?.shotId}</b><span className="cy-muted">{task?.status}</span><button className="cy-link" onClick={onClose}>{t.close}</button></div>
-      {task !== undefined && shown !== undefined && shown.previewPath !== null
+      {task !== undefined && shown !== undefined && (shown.previewPath !== null || shown.doc.stages.some(st => st.steps.length > 0))
         ? <Compare before={imageUrl(pid, task.shotId, 'preview')} after={renderUrl(pid, shown.id)} />
         : task !== undefined && <img className="cy-preview" src={imageUrl(pid, task.shotId, 'preview')} alt="" />}
       <h4>{t.revisions}</h4>

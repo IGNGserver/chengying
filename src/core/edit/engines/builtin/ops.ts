@@ -18,6 +18,8 @@ export interface BuiltinOp {
   params: ParamSchema
   geometry?: boolean
   maskable: boolean
+  /** Parameters that visibly change a typical photo (interface verification), when a single default change does not. */
+  example?: Record<string, unknown>
   apply(img: FImage, p: Record<string, any>, ctx: OpContext): FImage
 }
 
@@ -268,7 +270,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     }),
   },
   {
-    id: 'hsl', title: 'HSL / color mixer', category: 'color', maskable: true,
+    id: 'hsl', title: 'HSL / color mixer', category: 'color', maskable: true, example: { red: { saturation: 50, luminance: 10 }, blue: { hue: 20 } },
     description: 'Per-color hue shift, saturation and luminance for 8 hue bands (red, orange, yellow, green, aqua, blue, purple, magenta).',
     params: obj(Object.fromEntries(HSL_BANDS.map(([name]) => [name, obj({ hue: num(-100, 100, 0, 'hue shift (±30°)'), saturation: num(-100, 100, 0, 'saturation'), luminance: num(-100, 100, 0, 'luminance') })]))),
     apply: (img, p) => mapPixels(img, (r, g, b) => {
@@ -289,7 +291,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     }),
   },
   {
-    id: 'color_grading', title: 'Color grading', category: 'color', maskable: true,
+    id: 'color_grading', title: 'Color grading', category: 'color', maskable: true, example: { shadows: { hue: 220, saturation: 40 }, highlights: { hue: 45, saturation: 30 }, balance: 20 },
     description: 'Three-way color grading: tint shadows, midtones and highlights (hue in degrees, saturation 0..100), with balance.',
     params: obj({
       shadows: obj({ hue: num(0, 360, 220, 'hue (deg)'), saturation: num(0, 100, 0, 'strength') }),
@@ -313,7 +315,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     },
   },
   {
-    id: 'channel_mixer', title: 'Channel mixer', category: 'color', maskable: true,
+    id: 'channel_mixer', title: 'Channel mixer', category: 'color', maskable: true, example: { matrix: [[0.9, 0.1, 0], [0, 1, 0], [0, 0.15, 0.85]], preserve_luminance: false },
     description: 'Linear 3×3 RGB matrix (rows: output R, G, B). Identity is [[1,0,0],[0,1,0],[0,0,1]].',
     params: obj({ matrix: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'number', minimum: -2, maximum: 2 } }, default: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] }, preserve_luminance: { type: 'boolean', default: true } }),
     apply: (img, p) => mapPixels(img, (r, g, b) => {
@@ -531,7 +533,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     },
   },
   {
-    id: 'heal', title: 'Spot healing (classical)', category: 'repair', maskable: false,
+    id: 'heal', title: 'Spot healing (classical)', category: 'repair', maskable: false, example: { spots: [{ x: 0.72, y: 0.25, r: 0.04 }] },
     description: 'Remove dust spots / small blemishes by cloning from a nearby source with feathered edges and tone matching. Non-generative.',
     params: obj({
       spots: { type: 'array', minItems: 1, maxItems: 200, items: obj({ x: num(0, 1, 0.5, 'spot center x'), y: num(0, 1, 0.5, 'spot center y'), r: num(0.001, 0.2, 0.01, 'radius (relative to longer side)'), src_x: { type: 'number', minimum: 0, maximum: 1, description: 'source center x (auto when omitted)' }, src_y: { type: 'number', minimum: 0, maximum: 1, description: 'source center y' } }), default: [] },

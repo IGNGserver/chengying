@@ -107,6 +107,11 @@ export async function verifyEngine(engine: EngineAdapter, catalog: Catalog, opts
       results.set(op.id, { id: op.id, status: 'skipped', reason: 'pipeline-internal module (inserted by the engine at export, not addressable through history)' })
       continue
     }
+    const example = op.native?.example
+    if (example !== null && typeof example === 'object') {
+      planned.push({ op, step: { id: newId('v'), op: op.id, enabled: true, params: example as Record<string, unknown> }, changed: `example: ${JSON.stringify(example).slice(0, 120)}` })
+      continue
+    }
     // Prefer a real tool parameter over the on/off switch; the switch is set separately below.
     const p = perturb(op.params, k => !/^(Enabled|enabled)$/.test(k))
     if (p === undefined) {

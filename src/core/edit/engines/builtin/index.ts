@@ -16,7 +16,7 @@ import { nowIso } from '../../../util/misc.ts'
 
 declare const __CHENGYING_VERSION__: string
 const VERSION = typeof __CHENGYING_VERSION__ === 'string' ? __CHENGYING_VERSION__ : 'dev'
-const CATALOG_VERSION = 2
+const CATALOG_VERSION = 3
 
 const STAGE_OPTIONS: ParamSchema = {
   type: 'object',
@@ -47,6 +47,7 @@ export class BuiltinEngine implements EngineAdapter {
       masks: o.maskable ? ['parametric', 'drawn'] : [],
       multiInstance: true,
       tags: o.geometry ? ['geometry'] : [],
+      ...(o.example !== undefined ? { native: { example: o.example } } : {}),
     }))
     this.cached = {
       engine: this.id,

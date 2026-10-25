@@ -82,7 +82,7 @@ export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
             if (id === 'stage_options') return { id, params: strip(c.stageOptions) }
             const o = c.operations.find(x => x.id === id) ?? c.operations.find(x => x.id.toLowerCase() === id.toLowerCase())
             if (o === undefined) return { id, error: 'unknown operation' }
-            return { id: o.id, title: o.title, description: o.description, version: o.version, masks: o.masks, multiInstance: o.multiInstance, docs: o.docsUrl, params: strip(o.params) }
+            return { id: o.id, title: o.title, description: o.description, version: o.version, masks: o.masks, multiInstance: o.multiInstance, docs: o.docsUrl, params: strip(o.params), example: o.native?.example }
           }),
           maskModel: c.maskModel,
         }

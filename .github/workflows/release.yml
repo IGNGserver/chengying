@@ -89,6 +89,29 @@ jobs:
           bash scripts/package-plugin.sh "$RELEASE_VERSION" "$output_dir"
           echo "artifact_dir=$output_dir" >> "$GITHUB_OUTPUT"
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Build the installable DSH plugin bundle
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ steps.package.outputs.artifact_dir }}
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm build
+          pnpm test
+          pnpm pack --pack-destination "$ARTIFACT_DIR"
+          ls "$ARTIFACT_DIR"/chengying-*.tgz
+          (cd "$ARTIFACT_DIR" && sha256sum chengying-*.tgz >> SHA256SUMS)
+
       - name: Render release body
         id: notes
         shell: bash
