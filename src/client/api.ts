@@ -25,10 +25,19 @@ export const imageUrl = (project: string, shot: string, variant: 'thumb' | 'prev
 export const renderUrl = (project: string, revision: string): string => `${API_BASE}/p/${encodeURIComponent(project)}/render/${encodeURIComponent(revision)}`
 export const exportUrl = (project: string, exportId: string): string => `${API_BASE}/p/${encodeURIComponent(project)}/export-file/${encodeURIComponent(exportId)}`
 
+export interface PlanInfo {
+  id: string; sessionId: string; projectId: string; source: string
+  goal: 'cull' | 'retouch-deliver'; retouch: 'none' | 'engine' | 'generative' | 'hybrid'
+  cullQuality: 'fast' | 'balanced' | 'thorough'; outputDir: string
+  deliverMode: 'originals' | 'rendered'; checkpoint: 'after-selection' | 'none'
+  brief: string; stage: string; createdAt: string; updatedAt: string
+}
+
 export interface Summary {
   projectId: string; root: string; stateDir: string; exportDir: string; shots: number; raw: number; pairs: number
   withPreview: number; analyzed: number; judged: number; groups: Record<string, number>; selections: number
   tasks: Record<string, number>; exports: number
+  plans?: PlanInfo[]
   usage: Array<{ purpose: string; provider: string | null; model: string | null; calls: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; images: number }>
 }
 

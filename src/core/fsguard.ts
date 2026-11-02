@@ -52,6 +52,13 @@ export class FsGuard {
   private readonly readRoots: string[]
   private readonly isOriginal: (absPath: string) => boolean
 
+  /** Grant write access to one more Chengying-owned delivery directory. */
+  addWritableRoot(root: string): void {
+    const abs = realish(root)
+    if (!this.writableRoots.includes(abs)) this.writableRoots.push(abs)
+    if (!this.readRoots.includes(abs)) this.readRoots.push(abs)
+  }
+
   constructor(options: FsGuardOptions) {
     this.workspaceRoots = options.workspaceRoots.map(realish)
     this.writableRoots = options.writableRoots.map(realish)
@@ -87,6 +94,8 @@ export class FsGuard {
 
   /** Directories a recursive scan must skip because Chengying owns them. */
   ownedRoots(): readonly string[] {
-    return this.writableRoots
+    // A delivery directory may be the workspace itself; never skip the whole
+    // photo tree just because it was also made writable for an explicit export.
+    return this.writableRoots.filter(root => !this.workspaceRoots.includes(root))
   }
 }

@@ -23,10 +23,10 @@ describe.skipIf(!enabled)('DSH e2e · phase 1 culling through a real Harness age
 
   it('opens, culls, selects and adjusts via tools', async () => {
     const steps = (req: MockRequest): ReturnType<Parameters<typeof startMockLlm>[0]> => {
-      if (!req.tools.some(t => t.name === 'photo_workspace_open')) return { text: 'Photo culling' }
+      if (!req.tools.some(t => t.name === 'photo_session_start')) return { text: 'Photo culling' }
       const done = toolResults(req)
       switch (done.length) {
-        case 0: return { tools: [{ name: 'photo_workspace_open', input: { path: ws } }] }
+        case 0: return { tools: [{ name: 'photo_session_start', input: { path: ws, goal: 'cull', output_dir: join(ws, '_delivery') } }] }
         case 1: return { tools: [{ name: 'photo_cull_run', input: { background: false } }] }
         case 2: return { tools: [{ name: 'photo_select', input: { request: '帮我选4张最好的，按行程讲故事', count: 4 } }] }
         case 3: {
@@ -63,7 +63,7 @@ describe.skipIf(!enabled)('DSH e2e · phase 1 culling through a real Harness age
       await p.close()
     }
     // The workflow guidance reached the system prompt; our tools reached the model.
-    expect(llm.requests.some(r => r.system.includes('澄影 Chengying photo workflow'))).toBe(true)
+    expect(llm.requests.some(r => r.system.includes('澄影 Chengying 摄影后期工作流'))).toBe(true)
     expect(join(state)).toBeTruthy()
   })
 })

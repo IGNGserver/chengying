@@ -52,10 +52,10 @@ export class Project {
   readonly id: string
   readonly root: string
   readonly stateDir: string
-  readonly exportDir: string
+  exportDir: string
   readonly db: Db
   readonly repo: Repo
-  readonly guard: FsGuard
+  guard: FsGuard
   readonly metadata: MetadataService
   readonly features: FeaturePool
   readonly options: ProjectOptions
@@ -91,6 +91,41 @@ export class Project {
 
   path(...parts: string[]): string {
     return join(this.stateDir, ...parts)
+  }
+
+  /** Change the default delivery directory; the new root becomes writable immediately. */
+  setExportDir(dir: string): void {
+    const abs = resolve(dir)
+    mkdirSync(abs, { recursive: true })
+    this.exportDir = abs
+    this.db.setMeta('exportDir', abs)
+    this.guard = new FsGuard({
+      workspaceRoots: [this.root],
+      writableRoots: [this.stateDir, abs],
+      extraReadRoots: this.options.extraReadRoots,
+      isOriginal: p => this.repo.isOriginalPath(p),
+    })
+  }
+
+  /** Allow a per-delivery output directory without changing the project default. */
+  addWritableRoot(dir: string): string {
+    const abs = resolve(dir)
+    mkdirSync(abs, { recursive: true })
+    this.guard.addWritableRoot(abs)
+    return this.guard.writable(abs)
+  }
+
+  /** Session plans persisted by the Host tools, oldest first. */
+  plans(): Array<Record<string, unknown>> {
+    return this.db.all<{ value: string }>("SELECT value FROM meta WHERE key LIKE 'sessionPlan:%' ORDER BY rowid")
+      .flatMap(row => {
+        try {
+          const value = JSON.parse(row.value) as unknown
+          return value !== null && typeof value === 'object' && !Array.isArray(value) ? [value as Record<string, unknown>] : []
+        } catch {
+          return []
+        }
+      })
   }
 
   /* ------------------------------------------------------------ phase 1 */
@@ -353,6 +388,7 @@ export class Project {
       selections: this.repo.selections().length,
       tasks: Object.fromEntries(this.db.all<{ status: string; c: number }>('SELECT status, count(*) c FROM tasks GROUP BY status').map(r => [r.status, Number(r.c)])),
       exports: this.repo.exports().length,
+      plans: this.plans(),
       usage: this.repo.usageSummary(),
     }
   }

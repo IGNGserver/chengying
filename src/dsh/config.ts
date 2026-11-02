@@ -16,6 +16,11 @@ export interface EngineSetting {
 export type GenerativeProviderSetting = GenerativeProvider
 
 export interface Config {
+  /**
+   * auto: Host-only when the deployment has agent presets (tools come from the
+   * chengying preset), otherwise both. host/agent/both pin one surface.
+   */
+  mode: 'auto' | 'host' | 'agent' | 'both'
   stateRoot?: string
   exportDir?: string
   /** When non-empty, workspaces must live under one of these roots. */
@@ -24,6 +29,8 @@ export interface Config {
   analysisConcurrency: number
   /** Background job threshold: pipelines over this many files run as DSH jobs. */
   backgroundThreshold: number
+  /** Chat-attachment intake limits: files copied into the managed inbox per session. */
+  intake: { maxFiles: number; maxBytes: number }
   vlm: { enabled: boolean; provider?: string; model?: string; batchSize: number; cell: number; maxShots: number; language: 'zh' | 'en'; maxTokens: number }
   models: ModelConfig[]
   engines: { darktable: EngineSetting; rawtherapee: EngineSetting; builtin: EngineSetting; ai: EngineSetting }
@@ -50,12 +57,17 @@ const engine = (enabled = true): Schema<EngineSetting> => Schema.object({
 })
 
 export const Config: Schema<Config> = Schema.object({
+  mode: Schema.union(['auto', 'host', 'agent', 'both'] as const).default('auto').description('auto mounts the Host UI/runtime and leaves model tools to the chengying preset when agent presets exist; headless/direct setups keep both.'),
   stateRoot: Schema.string().description('Chengying state directory (database, previews, renders). Defaults to $CHENGYING_HOME or ~/.chengying. Must be on local disk.'),
   exportDir: Schema.string().description('Export directory. Defaults to <workspace>/_chengying_export.'),
   allowedRoots: Schema.array(Schema.string()).default([]).description('Restrict workspaces to these roots (empty = any directory the user names).'),
   previewEdge: Schema.natural().default(1600),
   analysisConcurrency: Schema.natural().default(4),
   backgroundThreshold: Schema.natural().default(150),
+  intake: Schema.object({
+    maxFiles: Schema.natural().default(200),
+    maxBytes: Schema.natural().default(4 * 1024 * 1024 * 1024),
+  }),
   vlm: Schema.object({
     enabled: Schema.boolean().default(true),
     provider: Schema.string().description('Vision model provider route; defaults to the calling agent\'s route.'),

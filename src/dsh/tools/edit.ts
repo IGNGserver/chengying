@@ -9,9 +9,9 @@ import type { ToolDefinition, ToolRunContext } from '../host-types.ts'
 import { anyJson, arr, bool, defineTool, int, obj, str, strEnum, type ToolImage } from '../tool.ts'
 import type { EditOp } from '../../core/edit/service.ts'
 import { signature } from '../../core/edit/schema.ts'
-import { exportPhotos } from '../../core/export/exporter.ts'
 import { ChengyingError } from '../../core/util/errors.ts'
 import type { Project } from '../../core/project.ts'
+import { runDelivery } from '../deliver.ts'
 
 const projectArg = str('Project id or workspace path (default: current workspace).')
 
@@ -210,18 +210,33 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
 
 export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
   return [
-    defineTool<{ project?: string; selection?: string; shots?: string[]; instructions: string; engine?: string; finish_with_builtin?: boolean; ai_stage?: boolean; stage_options?: Record<string, unknown>; force?: boolean }>({
+    defineTool<{ project?: string; selection?: string; shots?: string[]; instructions: string; engine?: string; finish_with_builtin?: boolean; ai_stage?: boolean; stage_options?: Record<string, unknown>; force?: boolean; confirm?: boolean }>({
       name: 'edit_tasks_create',
-      description: 'Create one resumable retouching task per photo (from a selection and/or shot ids). Each task starts from the best source (RAW when the engine can develop it) with an empty recipe. Instructions are given to the editing sub-agents verbatim, together with the user\'s preference profile.',
+      description: 'Create one resumable retouching task per photo (from a selection and/or shot ids). Each task starts from the best source (RAW when the engine can develop it) with an empty recipe. Instructions are given to the editing sub-agents verbatim, together with the user\'s preference profile. When the session plan has an after-selection checkpoint, the first call returns needsConfirmation without creating tasks; call again with confirm=true after the user approves.',
       parameters: obj({
         project: projectArg, selection: str('Selection id (default: latest).'), shots: arr(str('shot id'), 'Explicit shots.'),
         instructions: str('Retouching brief (style, priorities, constraints).'), engine: strEnum(['auto', 'darktable', 'rawtherapee', 'builtin'], 'Engine for development (default auto: darktable → RawTherapee → built-in).'),
-        finish_with_builtin: bool('Add a built-in finishing stage after RAW development.'), ai_stage: bool('Add an (initially empty) AI stage at the end (super-resolution, inpainting, style match).'), stage_options: anyJson('Options for the first stage (see edit_describe stage_options).'), force: bool('Create new tasks even when a task exists for a photo.'),
+        finish_with_builtin: bool('Add a built-in finishing stage after RAW development.'), ai_stage: bool('Add an (initially empty) AI stage at the end (super-resolution, inpainting, style match).'), stage_options: anyJson('Options for the first stage (see edit_describe stage_options).'), force: bool('Create new tasks even when a task exists for a photo.'), confirm: bool('Confirm the selection checkpoint and create tasks now.'),
       }, ['instructions']),
       async run(args, exec) {
         const project = rt.project(args.project, exec.agent?.id)
+        const plan = rt.planFor(project, exec)
+        if (plan?.goal === 'cull') throw new ChengyingError('conflict', 'the session plan is cull-only; call photo_session_start with goal="retouch-deliver" before creating retouch tasks')
+        if (plan?.retouch === 'none') throw new ChengyingError('conflict', 'the session plan disables retouching; update it with photo_session_start')
+        if (plan?.retouch === 'generative') throw new ChengyingError('conflict', 'the session plan uses generative retouching; call photo_ai_redraw instead of edit_tasks_create/edit_run')
         const selectionId = args.selection ?? (args.shots === undefined ? project.repo.latestSelectionId() : undefined)
+        if (plan?.checkpoint === 'after-selection' && args.confirm !== true) {
+          const selection = selectionId === undefined ? undefined : project.repo.selection(selectionId)
+          return {
+            needsConfirmation: true,
+            plan,
+            selection: selection === undefined ? undefined : { id: selection.id, name: selection.name, count: selection.items.filter(i => i.included).length, stats: selection.stats },
+            shots: args.shots,
+            note: 'The session plan requires a checkpoint after selection. Show the selection/contact sheet to the user; call edit_tasks_create again with confirm=true only after approval.',
+          }
+        }
         const r = await rt.edit(project).createTasks({ selectionId, shotIds: args.shots, instructions: args.instructions, engine: args.engine, stageOptions: args.stage_options, force: args.force, extraStages: [...(args.finish_with_builtin ? [{ engine: 'builtin' }] : []), ...(args.ai_stage ? [{ engine: 'ai' }] : [])] })
+        rt.updatePlanStage(project, exec, 'retouching')
         return { created: r.created.map(t => ({ id: t.id, shot: t.shotId, engine: t.engine })), existing: r.existing.map(t => ({ id: t.id, shot: t.shotId, status: t.status })), next: 'Run edit_run to let editing sub-agents work on queued tasks.' }
       },
     }),
@@ -257,33 +272,49 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
       async run(args, exec) {
         const project = rt.project(args.project, exec.agent?.id)
         if (exec.agent === undefined) throw new ChengyingError('unsupported', 'edit_run needs a calling agent (sub-agents are its children)')
+        const plan = rt.planFor(project, exec)
+        if (plan?.goal === 'cull') throw new ChengyingError('conflict', 'the session plan is cull-only; no retouch tasks should run')
+        if (plan?.retouch === 'generative') throw new ChengyingError('conflict', 'the session plan uses generative retouching; call photo_ai_redraw instead')
+        if (plan?.retouch === 'none') throw new ChengyingError('conflict', 'the session plan disables retouching; update the plan with photo_session_start')
         const r = await rt.runMaybeBackground(exec, { kind: 'edit', label: `chengying retouch · ${project.root}`, projectId: project.id, background: args.background !== false },
-          async (signal, progress) => await rt.orchestrator.run(project, exec, { taskIds: args.tasks, selectionId: args.selection, concurrency: args.concurrency, signal, progress }),
+          async (signal, progress) => {
+            const result = await rt.orchestrator.run(project, exec, { taskIds: args.tasks, selectionId: args.selection, concurrency: args.concurrency, signal, progress })
+            rt.updatePlanStage(project, exec, 'retouched')
+            return result
+          },
           res => `retouching finished: ${JSON.stringify(res.counts)}`)
         return r.mode === 'background' ? { mode: 'background', jobId: r.jobId, activityId: r.activityId } : { mode: 'inline', ...r.result }
       },
     }),
 
-    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; background?: boolean }>({
+    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; dir?: string; mode?: 'originals' | 'rendered'; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; source?: 'raster' | 'raw' | 'both'; manifest?: boolean; overwrite?: boolean; background?: boolean }>({
       name: 'export_run',
-      description: 'Export photos (default: the latest selection; edited ones from their latest revision, unedited ones with the engine default) to the export directory at full resolution: all source metadata (capture time + time zone, GPS, camera, lens, exposure, copyright) is copied and verified automatically, and a recoverable recipe (edit document + native XMP/pp3) is saved in _recipes/.',
-      parameters: obj({ project: projectArg, selection: str('Selection id.'), tasks: arr(str('task id'), 'Tasks.'), shots: arr(str('shot id'), 'Shots.'), format: strEnum(['jpeg', 'tiff', 'png'], 'default jpeg'), quality: int('JPEG quality (default 95).'), max_edge: int('Downscale long edge (default full resolution).'), subdir: str('Sub-folder inside the export directory.'), naming: strEnum(['original', 'datetime'], 'File naming.'), background: bool('Run as background job.') }),
+      description: 'Low-level export: rendered photos (default: latest selection; edited from their latest revision, unedited from the engine default) at full resolution with metadata verification and _recipes/, or originals copied byte-for-byte. Prefer photo_deliver for a plan-driven delivery; export_run supports the same dir/mode/manifest arguments.',
+      parameters: obj({
+        project: projectArg, selection: str('Selection id.'), tasks: arr(str('task id'), 'Tasks.'), shots: arr(str('shot id'), 'Shots.'),
+        dir: str('Delivery directory (absolute or ~/relative to the session workspace).'),
+        mode: strEnum(['originals', 'rendered'], 'originals = copy sources; rendered = full-res export. Default rendered.'),
+        format: strEnum(['jpeg', 'tiff', 'png'], 'default jpeg'), quality: int('JPEG quality (default 95).'), max_edge: int('Downscale long edge (default full resolution).'),
+        subdir: str('Sub-folder inside the export directory.'), naming: strEnum(['original', 'datetime'], 'File naming.'),
+        source: strEnum(['raster', 'raw', 'both'], 'For originals: camera JPEG, RAW, or both.'),
+        manifest: bool('Write manifest.json (default true).'), overwrite: bool('Replace this project’s earlier export (default true).'),
+        background: bool('Run as background job.'),
+      }),
       async run(args, exec) {
         const project = rt.project(args.project, exec.agent?.id)
-        if (args.selection === undefined && args.tasks === undefined && args.shots === undefined) {
-          args = { ...args, selection: project.repo.latestSelectionId() }
-          if (args.selection === undefined) throw new ChengyingError('invalid-argument', 'nothing to export: pass a selection, tasks or shots')
+        const result = await runDelivery(rt, project, exec, {
+          selection: args.selection, tasks: args.tasks, shots: args.shots, dir: args.dir ?? project.exportDir, mode: args.mode ?? 'rendered',
+          manifest: args.manifest, format: args.format as 'jpeg', quality: args.quality, maxEdge: args.max_edge,
+          subdir: args.subdir, naming: args.naming as 'original', source: args.source, overwrite: args.overwrite, background: args.background,
+        })
+        // Preserve export_run's compact item shape for existing agents.
+        if (result.mode === 'inline' && result.deliveryMode === 'rendered' && Array.isArray(result.items)) {
+          result.items = (result.items as Array<Record<string, any>>).map(item => ({
+            shot: item.shotId, path: item.path, verified: item.verified, error: item.error,
+            problems: item.verify === undefined || item.verify.ok ? undefined : { missing: item.verify.missing, mismatched: item.verify.mismatched },
+          }))
         }
-        const count = (args.tasks?.length ?? 0) + (args.shots?.length ?? 0) + (args.selection ? (project.repo.selection(args.selection)?.items.filter(i => i.included).length ?? 0) : 0)
-        const r = await rt.runMaybeBackground(exec, { kind: 'export', label: `chengying export · ${project.root}`, projectId: project.id, background: args.background ?? count > 8 },
-          async (signal, progress) => await exportPhotos(project, rt.edit(project), {
-            selectionId: args.selection, taskIds: args.tasks, shotIds: args.shots, format: args.format as 'jpeg', quality: args.quality, maxEdge: args.max_edge,
-            subdir: args.subdir, naming: args.naming as 'original', signal, onProgress: (d, t) => progress('export', d, t), authorize: rt.authorizer(project),
-          }),
-          res => `export: ${res.exported} exported, ${res.failed} failed, metadata ${res.verifiedAll ? 'verified' : 'NOT fully verified'} → ${res.dir}`)
-        if (r.mode === 'background') return { mode: 'background', jobId: r.jobId, activityId: r.activityId }
-        const res = r.result
-        return { exported: res.exported, failed: res.failed, metadataVerified: res.verifiedAll, dir: res.dir, items: res.items.map(i => ({ shot: i.shotId, path: i.path, verified: i.verified, error: i.error, problems: i.verify === undefined || i.verify.ok ? undefined : { missing: i.verify.missing, mismatched: i.verify.mismatched } })) }
+        return result
       },
     }),
   ]

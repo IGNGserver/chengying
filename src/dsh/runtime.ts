@@ -4,15 +4,18 @@
  * adapters over this object.
  */
 import sharp from 'sharp'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, renameSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 import type { Config } from './config.ts'
-import type { AgentLike, ApprovalService, AttachmentsService, HostContext, JobsService, LlmService, ToolRunContext } from './host-types.ts'
+import type { AgentLike, ApprovalService, AttachmentsService, FileAttachmentRef, HostContext, ImageAttachmentRef, JobsService, LlmService, SessionsService, ToolRunContext } from './host-types.ts'
 import type { ToolImage } from './tool.ts'
 import { Project, defaultStateRoot, projectIdFor } from '../core/project.ts'
 import { isInside } from '../core/fsguard.ts'
 import { ChengyingError, errorMessage } from '../core/util/errors.ts'
 import { chunk, newId, nowIso, round } from '../core/util/misc.ts'
+import { resolveUserPath } from '../core/util/path.ts'
+import { readPlan, writePlan, type PlanStage, type SessionPlan } from './plan.ts'
 import { buildVlmPrompt, parseVlmResponse, type VlmItem } from '../core/analysis/vlm.ts'
 import { mergeDims } from '../core/select/selector.ts'
 import { EngineRegistry } from '../core/edit/registry.ts'
@@ -57,27 +60,109 @@ export class ChengyingRuntime {
 
   /* ----------------------------------------------------------- projects */
 
-  openProject(path: string, agentId?: string, options: { exportDir?: string } = {}): Project {
-    const abs = resolve(path)
+  openProject(path: string, agentId?: string, options: { exportDir?: string; cwd?: string } = {}): Project {
+    const abs = resolveUserPath(path, options.cwd)
     if (!existsSync(abs) || !statSync(abs).isDirectory()) throw new ChengyingError('not-found', `workspace directory does not exist: ${path}`)
-    if (this.config.allowedRoots.length > 0 && !this.config.allowedRoots.some(r => isInside(abs, resolve(r)))) {
+    const owned = isInside(abs, this.stateRoot())
+    if (!owned && this.config.allowedRoots.length > 0 && !this.config.allowedRoots.some(r => isInside(abs, resolve(r)))) {
       throw new ChengyingError('permission-denied', `workspace ${abs} is outside the configured allowedRoots`, { allowedRoots: this.config.allowedRoots })
     }
+    const exportDir = options.exportDir === undefined ? undefined : resolveUserPath(options.exportDir, options.cwd)
     const id = projectIdFor(abs)
     let p = this.projects.get(id)
     if (p === undefined) {
       p = Project.open(abs, {
         stateRoot: this.config.stateRoot,
-        exportDir: options.exportDir ?? this.config.exportDir,
+        exportDir: exportDir ?? this.config.exportDir,
         previewEdge: this.config.previewEdge,
         concurrency: this.config.analysisConcurrency,
       })
       this.projects.set(id, p)
+    } else if (exportDir !== undefined) {
+      p.setExportDir(exportDir)
     }
     if (agentId !== undefined) this.current.set(agentId, id)
     this.lastProject = id
     this.rememberRecent(p)
     return p
+  }
+
+  /**
+   * Copy chat attachments or explicit files into a managed inbox and open it
+   * as a workspace. Originals stay untouched; the inbox is Chengying-owned.
+   */
+  importFiles(paths: string[], options: { agentId?: string; cwd?: string; exportDir?: string; name?: string } = {}): Project {
+    const files = paths.map(p => resolveUserPath(p, options.cwd)).filter(p => existsSync(p) && statSync(p).isFile())
+    if (files.length === 0) throw new ChengyingError('invalid-argument', 'no readable image/file attachments to import')
+    if (files.length > this.config.intake.maxFiles) throw new ChengyingError('invalid-argument', `too many files (${files.length} > intake.maxFiles ${this.config.intake.maxFiles})`)
+    const totalBytes = files.reduce((sum, p) => sum + statSync(p).size, 0)
+    if (totalBytes > this.config.intake.maxBytes) throw new ChengyingError('invalid-argument', `attachments exceed intake.maxBytes (${totalBytes} > ${this.config.intake.maxBytes})`)
+    const digest = createHash('sha1').update(files.join('\0')).update(String(Date.now())).digest('hex').slice(0, 12)
+    const root = join(this.stateRoot(), 'inbox', options.name?.replace(/[^\w.-]+/g, '_') ?? `session-${digest}`)
+    mkdirSync(root, { recursive: true })
+    for (const source of files) {
+      let target = join(root, basename(source))
+      if (existsSync(target) && resolve(target) !== resolve(source)) {
+        const ext = target.slice(target.lastIndexOf('.'))
+        const base = target.slice(0, target.length - ext.length)
+        let index = 1
+        while (existsSync(`${base}_${index}${ext}`)) index++
+        target = `${base}_${index}${ext}`
+      }
+      if (resolve(target) === resolve(source)) continue
+      copyFileSync(source, target)
+      const stat = statSync(source)
+      utimesSync(target, stat.atime, stat.mtime)
+    }
+    return this.openProject(root, options.agentId, { exportDir: options.exportDir, cwd: options.cwd })
+  }
+
+  /** Latest direct human prompt in this session that carries image/file attachments. */
+  attachmentPaths(exec: ToolRunContext): string[] {
+    const sessions = this.ctx.get('sessions') as SessionsService | undefined
+    const attachments = this.ctx.get('attachments') as AttachmentsService | undefined
+    const sessionId = exec.agent?.session.id
+    if (sessions === undefined || attachments === undefined || sessionId === undefined) return []
+    const session = sessions.get(sessionId)
+    if (session === undefined) return []
+    const messages = session.snapshotEvents().filter(event => event.type === 'user/message')
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const data = messages[index]?.data as { source?: { kind?: string }; content?: Array<Record<string, unknown>> } | undefined
+      if (data?.source?.kind !== 'user' || !Array.isArray(data.content)) continue
+      const paths: string[] = []
+      for (const block of data.content) {
+        try {
+          if (block.type === 'image') {
+            const path = attachments.imageHostPath?.(block.attachment as ImageAttachmentRef)
+            if (path !== undefined) paths.push(path)
+          } else if (block.type === 'file') {
+            const path = attachments.fileHostPath?.(block.attachment as FileAttachmentRef)
+            if (path !== undefined) paths.push(path)
+          }
+        } catch (error) {
+          this.log.warn('chengying: cannot resolve chat attachment path:', errorMessage(error))
+        }
+      }
+      if (paths.length > 0) return paths
+    }
+    return []
+  }
+
+  planFor(project: Project, exec: ToolRunContext): SessionPlan | undefined {
+    return readPlan(project, exec.agent?.session.id ?? exec.agent?.id ?? 'default')
+  }
+
+  savePlan(project: Project, plan: SessionPlan): SessionPlan {
+    return writePlan(project, plan)
+  }
+
+  updatePlanStage(project: Project, exec: ToolRunContext, stage: PlanStage): SessionPlan | undefined {
+    const plan = this.planFor(project, exec)
+    if (plan === undefined || plan.stage === stage) return plan
+    const next = { ...plan, stage, updatedAt: nowIso() }
+    writePlan(project, next)
+    project.repo.addEvent(null, 'info', 'plan', `photo session stage → ${stage}`, { plan: next.id, goal: next.goal, retouch: next.retouch })
+    return next
   }
 
   private recentFile(): string {
@@ -162,6 +247,12 @@ export class ChengyingRuntime {
 
   projectOrUndefined(agentId?: string): Project | undefined {
     try { return this.project(undefined, agentId) } catch { return undefined }
+  }
+
+  /** Only the workspace this agent opened; never another session's last project. */
+  projectForAgent(agentId?: string): Project | undefined {
+    const id = agentId === undefined ? undefined : this.current.get(agentId)
+    return id === undefined ? undefined : this.projects.get(id)
   }
 
   /** Find the open project owning a task (tools may omit the project). */

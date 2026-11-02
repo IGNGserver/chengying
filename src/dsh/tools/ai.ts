@@ -5,8 +5,9 @@
  */
 import type { ChengyingRuntime } from '../runtime.ts'
 import type { ToolDefinition, ToolRunContext } from '../host-types.ts'
-import { anyJson, arr, defineTool, int, num, obj, str, strEnum, type ToolImage } from '../tool.ts'
+import { anyJson, arr, bool, defineTool, int, num, obj, str, strEnum, type ToolImage } from '../tool.ts'
 import { ChengyingError } from '../../core/util/errors.ts'
+import { mapLimit } from '../../core/util/misc.ts'
 import type { MaskSpec } from '../../core/types.ts'
 import type { Project } from '../../core/project.ts'
 
@@ -71,6 +72,114 @@ export function aiTaskTools(rt: ChengyingRuntime, bound?: { projectId: string; t
 export function aiTools(rt: ChengyingRuntime): ToolDefinition[] {
   return [
     ...aiTaskTools(rt),
+
+    defineTool<{
+      project?: string
+      selection?: string
+      shots?: string[]
+      prompt: string
+      provider?: string
+      kind?: 'edit' | 'enhance'
+      max_edge?: number
+      concurrency?: number
+      replace?: boolean
+      confirm?: boolean
+      background?: boolean
+    }>({
+      name: 'photo_ai_redraw',
+      description: 'Batch generative retouch ("AI redraw") for a selection: one provider call per photo, no editing sub-agents. Requires one workspace generative authorization for the whole batch — call gen_authorize with max_uses equal to the number of photos first. Each result is a revertible gen_layer; exports are tagged as containing generated content. Use engine/hybrid plans for normal retouching.',
+      parameters: obj({
+        project: projectArg,
+        selection: str('Selection id (default: latest).'),
+        shots: arr(str('shot id'), 'Explicit shots (instead of a selection).'),
+        prompt: str('What the redraw should achieve; keep it faithful to the scene.'),
+        provider: str('Generative provider id (default: first configured).'),
+        kind: strEnum(['edit', 'enhance'], 'edit = instruction-driven whole-image edit; enhance = whole-image generative enhancement.'),
+        max_edge: int('Long edge sent to the provider (default 2048).'),
+        concurrency: int('Concurrent provider calls (default from editing.maxConcurrent).'),
+        replace: bool('Reset existing edits before the generative layer (default true).'),
+        confirm: bool('Confirm the after-selection checkpoint for this batch.'),
+        background: bool('Run as a background job (default for more than 8 photos).'),
+      }, ['prompt']),
+      async run(args, exec) {
+        const project = rt.project(args.project, exec.agent?.id)
+        const plan = rt.planFor(project, exec)
+        if (plan?.goal === 'cull') throw new ChengyingError('conflict', 'the session plan is cull-only; update it with photo_session_start before an AI redraw')
+        if (plan !== undefined && plan.retouch !== 'generative' && plan.retouch !== 'hybrid') {
+          throw new ChengyingError('conflict', `the session plan uses retouch="${plan.retouch}"; update it with photo_session_start before an AI redraw`)
+        }
+        const providers = rt.config.generative.providers
+        if (providers.length === 0) throw new ChengyingError('engine-unavailable', 'no generative provider is configured (generative.providers); configure one before AI redraw')
+        const provider = args.provider === undefined ? providers[0] : providers.find(p => p.id === args.provider)
+        if (provider === undefined) throw new ChengyingError('invalid-argument', `unknown provider ${args.provider}; configured: ${providers.map(p => p.id).join(', ')}`)
+        const selectionId = args.selection ?? (args.shots === undefined ? project.repo.latestSelectionId() : undefined)
+        const ids = new Set<string>(args.shots ?? [])
+        if (selectionId !== undefined) {
+          const selection = project.repo.selection(selectionId)
+          if (selection === undefined) throw new ChengyingError('not-found', `no selection ${selectionId}`)
+          for (const item of selection.items) if (item.included) ids.add(item.shotId)
+        }
+        const shotIds = [...ids]
+        if (shotIds.length === 0) throw new ChengyingError('invalid-argument', 'nothing to redraw: pass a selection or shot ids')
+        if (plan?.checkpoint === 'after-selection' && args.confirm !== true) {
+          return { needsConfirmation: true, plan, count: shotIds.length, note: 'The session plan requires a checkpoint after selection. Show the selection/contact sheet to the user; call photo_ai_redraw again with confirm=true after approval.' }
+        }
+        const now = new Date().toISOString()
+        const grant = project.repo.authorizations().find(a => a.scope === 'generative' && !a.revoked && a.shotId === null
+          && (a.expiresAt === null || a.expiresAt > now) && (a.maxUses === null || a.uses + shotIds.length <= a.maxUses))
+        if (grant === undefined && rt.config.generative.requireApproval) {
+          throw new ChengyingError('authorization-required', `AI redraw of ${shotIds.length} photo(s) needs one batch authorization: call gen_authorize({ max_uses: ${shotIds.length}, reason: "..." }) and wait for the user's approval, then call photo_ai_redraw again.`)
+        }
+        const background = args.background ?? shotIds.length > 8
+        const replace = args.replace ?? plan?.retouch !== 'hybrid'
+        const work = async (signal: AbortSignal, progress: (stage: string, done: number, total: number, message?: string) => void): Promise<Record<string, unknown>> => {
+          const svc = rt.edit(project)
+          let done = 0
+          const results = await mapLimit(shotIds, Math.max(1, args.concurrency ?? rt.config.editing.maxConcurrent), async (shotId) => {
+            let taskId: string | undefined
+            try {
+              let task = project.repo.tasks({ shotId }).filter(t => t.status !== 'cancelled').sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0]
+              if (task !== undefined && replace) {
+                await svc.applyOps(task.id, [{ op: 'reset' }], { author: 'ai-redraw', message: 'reset before AI redraw', signal })
+              }
+              if (task === undefined) {
+                const created = await svc.createTasks({ shotIds: [shotId], instructions: args.prompt, engine: 'auto' })
+                task = created.created[0] ?? created.existing[0]
+              }
+              if (task === undefined) throw new ChengyingError('internal', `could not create a task for ${shotId}`)
+              taskId = task.id
+              const auth = await rt.acquireGenerative(project, shotId, exec, `AI redraw: ${args.prompt.slice(0, 160)}`)
+              const generated = await svc.generate(task.id, {
+                provider,
+                kind: args.kind ?? 'edit',
+                prompt: args.prompt,
+                authorizationId: auth.id,
+                author: exec.agent?.id === undefined ? 'ai-redraw' : `agent:${exec.agent.id.slice(0, 8)}`,
+                maxEdge: args.max_edge ?? 2048,
+                signal,
+                message: `AI redraw: ${args.prompt.slice(0, 80)}`,
+              })
+              svc.setStatus(task.id, 'succeeded', { message: 'AI redraw completed', error: null })
+              return { shot: shotId, task: task.id, revision: generated.revision.seq, generative: true }
+            } catch (error) {
+              if (taskId !== undefined) svc.setStatus(taskId, 'failed', { error: (error as Error).message })
+              return { shot: shotId, error: (error as Error).message }
+            } finally {
+              progress('redraw', ++done, shotIds.length, shotId)
+            }
+          }, signal)
+          rt.updatePlanStage(project, exec, 'retouched')
+          return {
+            processed: results.filter(result => !('error' in result)).length,
+            failed: results.filter(result => 'error' in result).length,
+            results,
+          }
+        }
+        const r = await rt.runMaybeBackground(exec, { kind: 'redraw', label: `chengying AI redraw · ${project.root}`, projectId: project.id, background },
+          work, res => `AI redraw: ${res.processed} processed, ${res.failed} failed`)
+        return r.mode === 'background' ? { mode: 'background', jobId: r.jobId, activityId: r.activityId, note: 'AI redraw is running in the background; you will be notified when it settles.' } : { mode: 'inline', ...r.result }
+      },
+    }),
 
     defineTool<{ project?: string; reference: string; tasks?: string[]; selection?: string; strength?: number; color?: boolean; tone?: boolean }>({
       name: 'edit_unify_style',

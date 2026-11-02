@@ -29,6 +29,8 @@ export interface ExportOptions {
   maxEdge?: number
   bitDepth?: 8 | 16
   subdir?: string
+  /** Per-run delivery directory; defaults to the project export directory. */
+  dir?: string
   /** File naming: original base name (default) or capture time. */
   naming?: 'original' | 'datetime'
   overwrite?: boolean
@@ -66,7 +68,9 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
     taskByShot.set(t.shotId, tid)
   }
   if (shotIds.size === 0) throw new ChengyingError('invalid-argument', 'nothing to export (pass shots, a selection or tasks)')
-  const dir = project.guard.writable(opts.subdir !== undefined ? join(project.exportDir, opts.subdir.replace(/\.\.+/g, '_')) : project.exportDir)
+  const baseDir = project.addWritableRoot(opts.dir ?? project.exportDir)
+  const dir = project.guard.writable(opts.subdir !== undefined ? join(baseDir, opts.subdir.replace(/\.\.+/g, '_')) : baseDir)
+  mkdirSync(dir, { recursive: true })
   const recipeDir = join(dir, '_recipes')
   mkdirSync(recipeDir, { recursive: true })
   const items: ExportItem[] = []

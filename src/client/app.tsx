@@ -16,7 +16,7 @@ type Lang = 'zh' | 'en'
 const T: Record<Lang, Record<string, string>> = {
   zh: {
     overview: '概览', photos: '照片', selection: '选片', tasks: '修图任务', exports: '导出', logs: '日志与用量',
-    open: '打开', workspacePath: '照片文件夹路径', noProject: '还没有打开的工作区。输入照片文件夹路径，或在对话中让 Agent 打开。',
+    open: '打开', workspacePath: '照片文件夹路径', noProject: '还没有打开的工作区。新建任务时选择“澄影 · 摄影后期”预设，再给 Agent 一个照片目录或直接贴图；也可以在这里输入路径。',
     shots: '张照片', raw: 'RAW', pairs: 'RAW+JPEG', analyzed: '已分析', judged: '视觉评审', selections: '选片方案', exports_: '已导出',
     running: '进行中', none: '无', refresh: '刷新', quickSelect: '用自然语言选片，例如「选30张最好的，按行程讲故事」', select: '选片',
     included: '入选', excluded: '已移除', remove: '移除', restore: '恢复', lock: '锁定', unlock: '解锁', add: '加入当前选片',
@@ -28,10 +28,11 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: '生成式修改授权', grant: '授权生成式修改', grantScope: '本工作区 24 小时内最多 10 次', grantConfirm: '允许 AI 对本工作区的照片做生成式修改（会产生非拍摄所得的像素，导出时会标注）？', revoke: '撤销', authNote: '生成式修改会改变照片真实性，只在你明确授权后执行。',
     groups: '分组', duplicates: '近似重复组', scenes: '场景', segments: '行程段落', detail: '详情', close: '关闭', error: '错误',
     runCull: '自动筛图（扫描·预览·评分·分组）', rerunCull: '强制重算', lang: 'EN', emptyTasks: '暂无修图任务。在对话中让 Agent 对选片创建修图任务（edit_tasks_create）。', emptyExports: '暂无导出。',
+    plan: '当前会话计划', goal: '范围', retouchMode: '修图方式', cullQuality: '筛图质量', outputDir: '交付目录', deliverMode: '交付物', stage: '阶段', checkpoint: '选片确认',
   },
   en: {
     overview: 'Overview', photos: 'Photos', selection: 'Selection', tasks: 'Retouch tasks', exports: 'Exports', logs: 'Logs & usage',
-    open: 'Open', workspacePath: 'Photo folder path', noProject: 'No workspace open. Enter a folder path, or ask the agent to open one.',
+    open: 'Open', workspacePath: 'Photo folder path', noProject: 'No workspace open. Pick the Chengying preset for a new task, then give the agent a folder path or attach photos; you can also enter a path here.',
     shots: 'shots', raw: 'RAW', pairs: 'RAW+JPEG', analyzed: 'analyzed', judged: 'vision reviewed', selections: 'selections', exports_: 'exported',
     running: 'Running', none: 'None', refresh: 'Refresh', quickSelect: 'Select in natural language, e.g. "pick the best 30, tell the trip story"', select: 'Select',
     included: 'Included', excluded: 'Removed', remove: 'Remove', restore: 'Restore', lock: 'Lock', unlock: 'Unlock', add: 'Add to selection',
@@ -43,6 +44,7 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: 'Generative-edit authorizations', grant: 'Authorize generative edits', grantScope: 'this workspace, 24 h, up to 10 edits', grantConfirm: 'Allow AI to make generative edits to photos of this workspace (pixels not captured by the camera; exports are labelled)?', revoke: 'Revoke', authNote: 'Generative edits change photo authenticity and run only with your explicit authorization.',
     groups: 'Groups', duplicates: 'Near-duplicate groups', scenes: 'Scenes', segments: 'Trip segments', detail: 'Detail', close: 'Close', error: 'Error',
     runCull: 'Run culling (scan · previews · scores · groups)', rerunCull: 'Recompute', lang: '中', emptyTasks: 'No retouch tasks yet. Ask the agent to create them for a selection (edit_tasks_create).', emptyExports: 'No exports yet.',
+    plan: 'Session plan', goal: 'Goal', retouchMode: 'Retouch', cullQuality: 'Cull quality', outputDir: 'Delivery directory', deliverMode: 'Deliverable', stage: 'Stage', checkpoint: 'Selection checkpoint',
   },
 }
 
@@ -161,9 +163,22 @@ function Overview({ s, t, activities }: { s: Summary; t: Record<string, string>;
   }
   const stat = (label: string, v: number | string): React.ReactElement => <div className="cy-stat"><div className="cy-stat-v">{v}</div><div className="cy-muted">{label}</div></div>
   const tasks = Object.entries(s.tasks)
+  const plan = s.plans?.at(-1)
   return (
     <div>
       <div className="cy-path" title={s.root}>{s.root}</div>
+      {plan !== undefined && (
+        <div className="cy-plan">
+          <div className="cy-row"><b>{t.plan}</b><span className="cy-chip">{plan.stage}</span></div>
+          <div className="cy-small cy-muted">
+            {t.goal}: {plan.goal} · {t.retouchMode}: {plan.retouch} · {t.cullQuality}: {plan.cullQuality}
+          </div>
+          <div className="cy-small cy-muted">
+            {t.deliverMode}: {plan.deliverMode} · {t.checkpoint}: {plan.checkpoint} · {t.outputDir}: {plan.outputDir}
+          </div>
+          {plan.brief !== '' && <div className="cy-small cy-muted">{plan.brief}</div>}
+        </div>
+      )}
       <div className="cy-actions">
         <button className="cy-btn" onClick={() => void cull(false)}>{t.runCull}</button>
         <button className="cy-btn cy-ghost" onClick={() => void cull(true)}>{t.rerunCull}</button>

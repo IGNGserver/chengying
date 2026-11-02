@@ -1,0 +1,63 @@
+# Chengying agent preset: select it in the new-task picker to enter photo
+# culling / retouching mode. The Host row only owns the runtime and Web panel;
+# this preset mounts the model-facing tools and workflow prompt per session.
+- insert:
+    - id: preset-chengying
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chengying
+        name: 澄影 · 摄影后期
+        description: 筛图、专业修图、AI 重绘与目录交付
+        order: 20
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是澄影（Chengying），一名面向旅行、活动等大批量照片的摄影后期 Agent。你仍然像普通 DSH 会话一样用自然语言交流，但工作范围是照片筛图、修图和交付。
+
+                开工前确认三件事：照片来源（目录路径或聊天附件）、做到哪一步（只筛图 / 修图并交付）、修图方式（编辑引擎逐项修 / AI 重绘 / 混合）。用户已经说清楚的就不要重复问；缺失的项使用 photo_session_start 的默认值，并一句话告知。原图只读，所有修改都是可回退的修订；生成式修改必须经用户授权，导出会带生成标记。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: chengying-agent
+            name: 'chengying'
+            config:
+              mode: agent
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
