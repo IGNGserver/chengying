@@ -50,10 +50,12 @@ export interface ShotRow {
 
 export interface Activity { id: string; projectId: string | null; kind: string; label: string; state: string; stage: string; done: number; total: number; error?: string; startedAt: string; finishedAt?: string }
 
+export interface GroupInfo { id: string; label: string; size: number; members: string[]; info: Record<string, unknown> }
+
 export interface SelectionInfo { id: string; name: string; request: string | null; createdAt: string; count: number; stats: Record<string, unknown> }
 
 export interface TaskInfo {
-  id: string; shotId: string; status: string; engine: string | null; instructions: string; attempts: number; maxAttempts: number
+  id: string; shotId: string; status: string; engine: string | null; instructions: string; options?: Record<string, unknown>; attempts: number; maxAttempts: number
   error: string | null; headRevision: string | null; agentSession: string | null; createdAt: string; updatedAt: string
   startedAt: string | null; finishedAt: string | null
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; images: number; calls: number }

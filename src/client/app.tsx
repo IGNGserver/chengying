@@ -5,7 +5,7 @@
  * generative-edit authorizations and model usage.
  */
 import * as React from 'react'
-import { api, imageUrl, renderUrl, type Activity, type EventInfo, type RevisionInfo, type SelectionInfo, type ShotRow, type Summary, type TaskInfo } from './api.ts'
+import { api, imageUrl, renderUrl, type Activity, type EventInfo, type GroupInfo, type RevisionInfo, type SelectionInfo, type ShotRow, type Summary, type TaskInfo } from './api.ts'
 import { STYLES } from './styles.ts'
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React
@@ -28,6 +28,7 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: '生成式修改授权', grant: '授权生成式修改', grantScope: '本工作区 24 小时内最多 10 次', grantConfirm: '允许 AI 对本工作区的照片做生成式修改（会产生非拍摄所得的像素，导出时会标注）？', revoke: '撤销', authNote: '生成式修改会改变照片真实性，只在你明确授权后执行。',
     groups: '分组', duplicates: '近似重复组', scenes: '场景', segments: '行程段落', detail: '详情', close: '关闭', error: '错误',
     runCull: '自动筛图（扫描·预览·评分·分组）', rerunCull: '强制重算', lang: 'EN', emptyTasks: '暂无修图任务。在对话中让 Agent 对选片创建修图任务（edit_tasks_create）。', emptyExports: '暂无导出。',
+    minScore: '最低分', viewMode: '视图', gridView: '全部照片', nearGroups: '近似重复/连拍组对比', sceneGroups: '同场景组对比', zoom: '放大对比', estCost: '估算费用', avgDuration: '平均耗时', unchanged: '原片直出',
     plan: '当前会话计划', goal: '范围', retouchMode: '修图方式', cullQuality: '筛图质量', outputDir: '交付目录', deliverMode: '交付物', stage: '阶段', checkpoint: '选片确认',
   },
   en: {
@@ -44,6 +45,7 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: 'Generative-edit authorizations', grant: 'Authorize generative edits', grantScope: 'this workspace, 24 h, up to 10 edits', grantConfirm: 'Allow AI to make generative edits to photos of this workspace (pixels not captured by the camera; exports are labelled)?', revoke: 'Revoke', authNote: 'Generative edits change photo authenticity and run only with your explicit authorization.',
     groups: 'Groups', duplicates: 'Near-duplicate groups', scenes: 'Scenes', segments: 'Trip segments', detail: 'Detail', close: 'Close', error: 'Error',
     runCull: 'Run culling (scan · previews · scores · groups)', rerunCull: 'Recompute', lang: '中', emptyTasks: 'No retouch tasks yet. Ask the agent to create them for a selection (edit_tasks_create).', emptyExports: 'No exports yet.',
+    minScore: 'Min score', viewMode: 'View', gridView: 'All photos', nearGroups: 'Near-duplicate bursts', sceneGroups: 'Scene groups', zoom: 'Fullscreen compare', estCost: 'Est. cost', avgDuration: 'Avg time', unchanged: 'Unchanged',
     plan: 'Session plan', goal: 'Goal', retouchMode: 'Retouch', cullQuality: 'Cull quality', outputDir: 'Delivery directory', deliverMode: 'Deliverable', stage: 'Stage', checkpoint: 'Selection checkpoint',
   },
 }
@@ -235,33 +237,74 @@ function ShotDetail({ pid, shot, t, onClose, selection }: { pid: string; shot: s
 function Photos({ pid, t }: { pid: string; t: Record<string, string> }): React.ReactElement {
   const [sort, setSort] = useState('time')
   const [issue, setIssue] = useState('')
+  const [minScore, setMinScore] = useState(0)
+  const [groupMode, setGroupMode] = useState<'' | 'near' | 'scene'>('')
   const [detail, setDetail] = useState<string>()
   const [limit, setLimit] = useState(120)
   const sels = usePoll(() => api<{ selections: SelectionInfo[] }>(`/p/${pid}/selections`), [pid], 10000)
-  const rows = usePoll(() => api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?sort=${sort}&limit=${limit}${issue ? `&issue=${issue}` : ''}`), [pid, sort, issue, limit], 8000)
+  const rows = usePoll(() => api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?sort=${sort}&limit=${limit}${issue ? `&issue=${issue}` : ''}${minScore > 0 ? `&min_score=${minScore}` : ''}`), [pid, sort, issue, minScore, limit], 8000)
+  const groups = usePoll(() => groupMode === '' ? Promise.resolve({ groups: [] as GroupInfo[] }) : api<{ groups: GroupInfo[] }>(`/p/${pid}/groups?kind=${groupMode}`), [pid, groupMode], 8000)
   const latest = sels.data?.selections[0]?.id
+  const shotById = useMemo(() => new Map((rows.data?.shots ?? []).map(s => [s.id, s])), [rows.data])
+  const quickFlag = async (shotId: string, f: 'pick' | 'reject'): Promise<void> => {
+    await api(`/p/${pid}/flag`, { method: 'POST', body: { shots: [shotId], flag: f } })
+    rows.reload()
+  }
   return (
     <div>
       <div className="cy-toolbar">
+        <label>{t.viewMode} <select className="cy-select" value={groupMode} onChange={e => setGroupMode(e.target.value as '' | 'near' | 'scene')}>
+          <option value="">{t.gridView}</option>
+          <option value="near">{t.nearGroups}</option>
+          <option value="scene">{t.sceneGroups}</option>
+        </select></label>
         <label>{t.sort} <select className="cy-select" value={sort} onChange={e => setSort(e.target.value)}>
           {['time', 'technical', 'aesthetic', 'content', 'potential'].map(k => <option key={k} value={k}>{t[k] ?? k}</option>)}
         </select></label>
         <label>{t.filterIssue} <select className="cy-select" value={issue} onChange={e => setIssue(e.target.value)}>
           <option value="">{t.all}</option>
-          {['out-of-focus', 'motion-blur', 'highlight-clipping', 'underexposed', 'overexposed', 'noisy', 'tilted-horizon', 'color-cast', 'flat'].map(i => <option key={i} value={i}>{i}</option>)}
+          {['eyes-closed', 'subject-out-of-focus', 'out-of-focus', 'motion-blur', 'highlight-clipping', 'underexposed', 'overexposed', 'noisy', 'tilted-horizon', 'color-cast', 'flat'].map(i => <option key={i} value={i}>{i}</option>)}
         </select></label>
+        <label title={`${t.minScore}: ${minScore}`}>{t.minScore} <input className="cy-range" type="range" min={0} max={90} step={5} value={minScore} onChange={e => setMinScore(Number(e.target.value))} /><span className="cy-small cy-muted">{minScore > 0 ? `≥${minScore}` : t.all}</span></label>
         <span className="cy-muted">{rows.data?.total ?? 0}</span>
       </div>
-      <div className="cy-grid">
-        {(rows.data?.shots ?? []).map(s => (
-          <div key={s.id} className={`cy-cell${s.flag === 'reject' ? ' cy-rejected' : ''}${s.flag === 'pick' ? ' cy-picked' : ''}`} onClick={() => setDetail(s.id)}>
-            <img loading="lazy" src={imageUrl(pid, s.id, 'thumb')} alt={s.id} />
-            <Scores s={s.scores} t={t} />
-            {s.issues.length > 0 && <div className="cy-issue" title={s.issues.join(', ')}>⚠ {s.issues[0]}</div>}
-          </div>
-        ))}
-      </div>
-      {(rows.data?.total ?? 0) > limit && <button className="cy-btn cy-ghost" onClick={() => setLimit(limit + 120)}>+120</button>}
+      {groupMode !== '' ? (
+        <div>
+          {(groups.data?.groups ?? []).filter(g => g.size >= (groupMode === 'near' ? 2 : 1)).map(g => (
+            <div key={g.id} className="cy-group-card">
+              <div className="cy-row"><b>{g.label}</b><span className="cy-muted cy-small">{g.size}</span></div>
+              <div className="cy-group-row">
+                {g.members.map((id, idx) => {
+                  const s = shotById.get(id)
+                  return (
+                    <div key={id} className={`cy-cell${s?.flag === 'reject' ? ' cy-rejected' : ''}${s?.flag === 'pick' ? ' cy-picked' : ''}`}>
+                      <img loading="lazy" src={imageUrl(pid, id, 'thumb')} alt={id} onClick={() => setDetail(id)} />
+                      <div className="cy-row cy-small">
+                        <span>{idx === 0 ? '★ #1' : `#${idx + 1}`}</span>
+                        <button className="cy-link" onClick={() => void quickFlag(id, 'pick')}>{t.pick}</button>
+                        <button className="cy-link" onClick={() => void quickFlag(id, 'reject')}>{t.reject}</button>
+                      </div>
+                      {s && <Scores s={s.scores} t={t} />}
+                      {s && s.issues.length > 0 && <div className="cy-issue" title={s.issues.join(', ')}>⚠ {s.issues[0]}</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="cy-grid">
+          {(rows.data?.shots ?? []).map(s => (
+            <div key={s.id} className={`cy-cell${s.flag === 'reject' ? ' cy-rejected' : ''}${s.flag === 'pick' ? ' cy-picked' : ''}`} onClick={() => setDetail(s.id)}>
+              <img loading="lazy" src={imageUrl(pid, s.id, 'thumb')} alt={s.id} />
+              <Scores s={s.scores} t={t} />
+              {s.issues.length > 0 && <div className="cy-issue" title={s.issues.join(', ')}>⚠ {s.issues[0]}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {groupMode === '' && (rows.data?.total ?? 0) > limit && <button className="cy-btn cy-ghost" onClick={() => setLimit(limit + 120)}>+120</button>}
       {detail !== undefined && <ShotDetail pid={pid} shot={detail} t={t} selection={latest} onClose={() => setDetail(undefined)} />}
     </div>
   )
@@ -388,15 +431,30 @@ function Tasks({ pid, t }: { pid: string; t: Record<string, string> }): React.Re
 function TaskDetail({ pid, id, t, onClose }: { pid: string; id: string; t: Record<string, string>; onClose: () => void }): React.ReactElement {
   const d = usePoll(() => api<{ task: TaskInfo; revisions: RevisionInfo[]; events: EventInfo[] }>(`/p/${pid}/task/${id}`), [pid, id], 3000)
   const [rev, setRev] = useState<string>()
+  const [zoom, setZoom] = useState(false)
   const task = d.data?.task
   const revs = d.data?.revisions ?? []
   const shown = revs.find(r => r.id === (rev ?? task?.headRevision)) ?? revs[revs.length - 1]
+  const hasCompare = task !== undefined && shown !== undefined && (shown.previewPath !== null || shown.doc.stages.some(st => st.steps.length > 0))
   return (
     <div className="cy-drawer cy-wide">
-      <div className="cy-row"><b>{task?.shotId}</b><span className="cy-muted">{task?.status}</span><button className="cy-link" onClick={onClose}>{t.close}</button></div>
-      {task !== undefined && shown !== undefined && (shown.previewPath !== null || shown.doc.stages.some(st => st.steps.length > 0))
+      <div className="cy-row">
+        <b>{task?.shotId}</b>
+        <span className="cy-muted">{task?.status}{task?.options?.unchanged ? ` · ${t.unchanged}` : ''}</span>
+        {hasCompare && <button className="cy-link" onClick={() => setZoom(true)}>{t.zoom}</button>}
+        <button className="cy-link" onClick={onClose}>{t.close}</button>
+      </div>
+      {hasCompare && task !== undefined && shown !== undefined
         ? <Compare before={imageUrl(pid, task.shotId, 'preview')} after={renderUrl(pid, shown.id)} />
         : task !== undefined && <img className="cy-preview" src={imageUrl(pid, task.shotId, 'preview')} alt="" />}
+      {zoom && hasCompare && task !== undefined && shown !== undefined && (
+        <div className="cy-lightbox" onClick={() => setZoom(false)}>
+          <div onClick={e => e.stopPropagation()}>
+            <div className="cy-row" style={{ marginBottom: 8 }}><b>{task.shotId} · #{shown.seq}</b><button className="cy-btn" onClick={() => setZoom(false)}>{t.close}</button></div>
+            <Compare before={imageUrl(pid, task.shotId, 'preview')} after={renderUrl(pid, shown.id)} />
+          </div>
+        </div>
+      )}
       <h4>{t.revisions}</h4>
       <div className="cy-revs">
         {revs.map(r => (
@@ -463,10 +521,19 @@ function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.
 
 function Logs({ pid, s, t }: { pid: string; s: Summary; t: Record<string, string> }): React.ReactElement {
   const ev = usePoll(() => api<{ events: EventInfo[] }>(`/p/${pid}/events?limit=300`), [pid], 4000)
+  const tasks = usePoll(() => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks`).catch(() => ({ tasks: [] as TaskInfo[] })), [pid], 6000)
   const totals = s.usage.reduce((a, u) => ({ calls: a.calls + u.calls, i: a.i + u.inputTokens, o: a.o + u.outputTokens, im: a.im + u.images }), { calls: 0, i: 0, o: 0, im: 0 })
+  const estUsd = ((totals.i * 1.0 + totals.o * 4.0) / 1_000_000).toFixed(4)
+  const durations = (tasks.data?.tasks ?? [])
+    .filter(x => x.startedAt && x.finishedAt)
+    .map(x => Math.max(0, (Date.parse(x.finishedAt as string) - Date.parse(x.startedAt as string)) / 1000))
+  const avgSec = durations.length > 0 ? (durations.reduce((a, b) => a + b, 0) / durations.length).toFixed(1) : '–'
   return (
     <div>
       <h4>{t.usage}</h4>
+      <div className="cy-small cy-muted" style={{ marginBottom: 6 }}>
+        {t.estCost}: ~${estUsd} · {t.avgDuration}: {avgSec}s ({durations.length})
+      </div>
       <table className="cy-table">
         <thead><tr><th /><th>{t.calls}</th><th>{t.tokensIn}</th><th>{t.tokensOut}</th><th>{t.images}</th></tr></thead>
         <tbody>

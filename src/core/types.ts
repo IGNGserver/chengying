@@ -36,6 +36,8 @@ export interface PhotoMetadata {
   focalLength?: number
   width?: number
   height?: number
+  bitsPerSample?: number
+  exposureBias?: number
   orientation?: number
   rating?: number
   mimeType?: string
@@ -85,7 +87,7 @@ export interface Features {
   /** 8x8 Lab thumbnail flattened (L,a,b) for scene similarity. */
   layout: number[]
   sharpness: { global: number; peak: number; centerWeighted: number; anisotropy: number }
-  exposure: { mean: number; median: number; p01: number; p99: number; clipHigh: number; clipLow: number; entropy: number; dynamicRange: number }
+  exposure: { mean: number; median: number; p01: number; p99: number; clipHigh: number; clipLow: number; singleChannelClipHigh?: number; allChannelClipHigh?: number; shadowHeadroom?: number; entropy: number; dynamicRange: number }
   contrast: number
   noise: number
   color: { colorfulness: number; saturation: number; castA: number; castB: number; warmth: number }
@@ -99,6 +101,15 @@ export interface Features {
     symmetry: number
     borderClutter: number
     subjectContrast: number
+  }
+  subject?: {
+    skinRatio: number
+    faceRegions: number
+    faceBox?: [number, number, number, number]
+    subjectSharpness: number
+    subjectSharpnessRatio: number
+    eyeLineContrast: number
+    eyesClosedSuspected: boolean
   }
 }
 

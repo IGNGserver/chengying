@@ -14,6 +14,44 @@ import type { ScoreSet, SelectionSpec, Shot } from '../../core/types.ts'
 
 const projectArg = str('Project id or workspace path; defaults to the workspace opened most recently in this session.')
 
+/**
+ * Pick shots for VLM contact-sheet review:
+ *  - For multi-shot near-duplicate / burst groups, include the top 2 contenders
+ *    side by side so the VLM can compare expressions, eyes and framing within
+ *    bursts before selection collapses them;
+ *  - Fill the remaining budget with the highest-ranked standalone shots.
+ */
+export function selectVlmCandidates(project: Project, limit: number, force = false): string[] {
+  if (limit <= 0) return []
+  const needsVlm = (id: string): boolean => force || !Object.keys(project.repo.scores(id)).some(k => k.startsWith('vlm:'))
+  const picked: string[] = []
+  const seen = new Set<string>()
+  const add = (id: string): void => {
+    if (!seen.has(id) && picked.length < limit && needsVlm(id)) {
+      seen.add(id)
+      picked.push(id)
+    }
+  }
+  const nearMemberIds = new Set<string>()
+  const nearGroups = [...project.groups('near')].sort((a, b) => project.rankOf(b.members[0]?.shotId ?? '') - project.rankOf(a.members[0]?.shotId ?? ''))
+  for (const g of nearGroups) {
+    for (const m of g.members) nearMemberIds.add(m.shotId)
+    // Include top 2 contenders from each burst group so VLM can compare them.
+    const topContenders = g.members.slice(0, Math.min(2, g.members.length))
+    for (const m of topContenders) add(m.shotId)
+  }
+  const standalone = project.repo.shots()
+    .filter(s => !nearMemberIds.has(s.id))
+    .sort((a, b) => project.rankOf(b.id) - project.rankOf(a.id))
+  for (const s of standalone) add(s.id)
+  // If budget remains, add remaining burst members ranked by score.
+  if (picked.length < limit) {
+    const rest = project.repo.shots().sort((a, b) => project.rankOf(b.id) - project.rankOf(a.id))
+    for (const s of rest) add(s.id)
+  }
+  return picked
+}
+
 export function shotRow(project: Project, s: Shot, detail = false): Record<string, unknown> {
   const scores = project.repo.scores(s.id)
   const d = mergeDims(scores)
@@ -82,7 +120,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
       async run(args, exec) {
         const project = P(args, exec)
         const plan = rt.planFor(project, exec)
-        const quality = args.quality ?? plan?.cullQuality ?? 'fast'
+        const quality = args.quality ?? plan?.cullQuality ?? 'balanced'
         const steps = args.steps ?? (quality === 'fast'
           ? ['scan', 'previews', 'analyze', 'group']
           : quality === 'thorough'
@@ -96,10 +134,13 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
           if (steps.includes('scan')) out.scan = await project.scan({ signal, onProgress })
           if (steps.includes('previews')) out.previews = await project.buildPreviews({ force: args.force, signal, onProgress })
           if (steps.includes('analyze')) out.analyze = await project.analyze({ force: args.force, signal, onProgress })
-          if (steps.includes('models') && rt.config.models.length > 0) out.models = await project.scoreWithModels(rt.config.models, { force: args.force, signal, onProgress })
+          if (steps.includes('models')) {
+            const models = rt.config.models.length > 0 ? rt.config.models : [{ id: 'builtin-portrait', type: 'builtin' as const }]
+            out.models = await project.scoreWithModels(models, { force: args.force, signal, onProgress })
+          }
           if (steps.includes('vlm') && rt.config.vlm.enabled) {
             const limit = args.vlm_candidates ?? (quality === 'thorough' ? rt.config.vlm.maxShots : 120)
-            const ids = project.repo.shots().filter(s => args.force === true || !Object.keys(project.repo.scores(s.id)).some(k => k.startsWith('vlm:'))).map(s => s.id).slice(0, Math.max(0, limit))
+            const ids = selectVlmCandidates(project, Math.max(0, limit), args.force === true)
             try {
               out.vlm = await rt.vlmScore(project, ids, exec, { purpose: args.vlm_purpose, signal, progress: (d, t) => progress('vlm', d, t) })
             } catch (error) {
@@ -257,14 +298,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         const project = P(args, exec)
         let ids = args.shots
         if (ids === undefined) {
-          const near = new Map<string, string>()
-          for (const g of project.groups('near')) for (const m of g.members.slice(1)) near.set(m.shotId, g.id)
-          ids = project.repo.shots()
-            .filter(s => !near.has(s.id) && !Object.keys(project.repo.scores(s.id)).some(k => k.startsWith('vlm:')))
-            .map(s => ({ id: s.id, r: project.rankOf(s.id) }))
-            .sort((a, b) => b.r - a.r)
-            .slice(0, args.candidates ?? 120)
-            .map(x => x.id)
+          ids = selectVlmCandidates(project, args.candidates ?? 120, false)
         }
         const list = ids
         const r = await rt.runMaybeBackground(exec, { kind: 'vlm', label: `chengying vision scoring (${list.length})`, projectId: project.id, background: args.background ?? list.length > 36 },

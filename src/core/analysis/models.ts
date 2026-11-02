@@ -14,10 +14,13 @@ import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
 import { run } from '../util/proc.ts'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
-import { clamp } from '../util/misc.ts'
+import { clamp, round } from '../util/misc.ts'
+import { computeFeatures } from './pixels.ts'
+import { aestheticScore, technicalScore } from './scoring.ts'
 import type { ScoreSet } from '../types.ts'
 
 export type ModelConfig =
+  | { id: string; type: 'builtin'; maxEdge?: number; batchSize?: number; dimension?: string }
   | { id: string; type: 'command'; command: string; args?: string[]; batchSize?: number; timeoutMs?: number; dimension?: string }
   | { id: string; type: 'http'; url: string; headers?: Record<string, string>; batchSize?: number; timeoutMs?: number; dimension?: string }
   | {
@@ -155,8 +158,41 @@ class OnnxScorer implements ModelScorer {
   }
 }
 
+/**
+ * Built-in high-resolution crop scorer: decodes at higher resolution (default
+ * 1024 px) to inspect fine portrait focus, eye-band openness and micro-contrast
+ * without requiring external binaries or ONNX weights.
+ */
+class BuiltinScorer implements ModelScorer {
+  readonly batchSize: number
+  constructor(private readonly cfg: Extract<ModelConfig, { type: 'builtin' }>) { this.batchSize = cfg.batchSize ?? 8 }
+  get id(): string { return this.cfg.id }
+  async score(paths: string[], signal?: AbortSignal): Promise<ScoreSet[]> {
+    const edge = this.cfg.maxEdge ?? 1024
+    const out: ScoreSet[] = []
+    for (const p of paths) {
+      signal?.throwIfAborted()
+      const { data, info } = await sharp(p, { failOn: 'none' }).resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true }).removeAlpha().toColourspace('srgb').raw().toBuffer({ resolveWithObject: true })
+      const f = computeFeatures({ width: info.width, height: info.height, data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) })
+      const tech = technicalScore(f, { isRaw: false })
+      const aes = aestheticScore(f, { isRaw: false })
+      out.push({
+        technical: tech.technical,
+        aesthetic: aes.aesthetic,
+        composition: aes.composition,
+        content: f.subject && f.subject.faceRegions > 0 ? round(clamp(65 + f.subject.eyeLineContrast * 30 - (f.subject.eyesClosedSuspected ? 25 : 0), 0, 100), 1) : undefined,
+        tags: tech.tags,
+        issues: [...new Set([...(tech.issues ?? []), ...(aes.issues ?? [])])],
+        detail: { ...tech.detail, highResEdge: Math.max(info.width, info.height) },
+      })
+    }
+    return out
+  }
+}
+
 export function createModelScorer(cfg: ModelConfig): ModelScorer {
   switch (cfg.type) {
+    case 'builtin': return new BuiltinScorer(cfg)
     case 'command': return new CommandScorer(cfg)
     case 'http': return new HttpScorer(cfg)
     case 'onnx': return new OnnxScorer(cfg)

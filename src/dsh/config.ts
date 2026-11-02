@@ -41,6 +41,8 @@ export interface Config {
     subagentProvider: string
     maxConcurrent: number
     maxAttempts: number
+    maxRevisionsPerTask: number
+    maxTokensPerTask: number
     previewEdge: number
     /** Optional model override for editing children (provider/model). */
     childProvider?: string
@@ -48,6 +50,7 @@ export interface Config {
   }
   generative: { providers: GenerativeProviderSetting[]; requireApproval: boolean }
   superResolution: { command?: string; args?: string[]; model?: string; timeoutMs?: number }
+  privacy: { stripGpsForCloud: boolean }
   ui: { enabled: boolean; basePath: string }
 }
 
@@ -73,7 +76,7 @@ export const Config: Schema<Config> = Schema.object({
     provider: Schema.string().description('Vision model provider route; defaults to the calling agent\'s route.'),
     model: Schema.string(),
     batchSize: Schema.natural().default(9),
-    cell: Schema.natural().default(384),
+    cell: Schema.natural().default(512),
     maxShots: Schema.natural().default(400),
     language: Schema.union(['zh', 'en'] as const).default('zh'),
     maxTokens: Schema.natural().default(4096),
@@ -91,6 +94,8 @@ export const Config: Schema<Config> = Schema.object({
     subagentProvider: Schema.string().default('spawn'),
     maxConcurrent: Schema.natural().default(2),
     maxAttempts: Schema.natural().default(3),
+    maxRevisionsPerTask: Schema.natural().default(8).description('Max edit_apply revisions per task before the sub-agent must conclude.'),
+    maxTokensPerTask: Schema.natural().default(120_000).description('Max total model tokens (input + output) per retouching task (0 disables cap).'),
     previewEdge: Schema.natural().default(1400),
     childProvider: Schema.string(),
     childModel: Schema.string(),
@@ -105,6 +110,9 @@ export const Config: Schema<Config> = Schema.object({
     model: Schema.string(),
     timeoutMs: Schema.natural(),
   }),
+  privacy: Schema.object({
+    stripGpsForCloud: Schema.boolean().default(true).description('Omit exact GPS coordinates from cloud VLM prompts and strip metadata from cloud-uploaded previews.'),
+  }).default({ stripGpsForCloud: true }),
   ui: Schema.object({
     enabled: Schema.boolean().default(true),
     basePath: Schema.string().default('/api/chengying'),

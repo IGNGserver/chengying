@@ -194,11 +194,14 @@ export class Project {
       } else {
         try {
           const f = await this.features.compute(shot.previewPath, this.options.analysisEdge ?? 512)
+          const primaryMeta = this.repo.file(shot.rawFile ?? shot.primaryFile)?.meta
           const ctx = {
             isRaw: shot.rawFile !== null,
             iso: shot.iso,
             exposureTime: shot.exposureTime,
             focalLength: shot.focalLength,
+            bitsPerSample: primaryMeta?.bitsPerSample ?? null,
+            exposureBias: primaryMeta?.exposureBias ?? null,
             hour: shot.captureTime !== null ? Number(shot.captureTime.slice(11, 13)) + Number(shot.captureTime.slice(14, 16)) / 60 : null,
           }
           const tech = technicalScore(f, ctx)
@@ -206,8 +209,11 @@ export class Project {
           const pot = potentialScore(f, tech, ctx)
           this.db.tx(() => {
             this.repo.saveFeatures(shot.id, f)
-            this.repo.saveScore(shot.id, 'technical', { ...tech, potential: pot.potential, reasons: { ...tech.reasons, ...pot.reasons }, overall: tech.technical }, FEATURE_VERSION)
+            this.repo.saveScore(shot.id, 'technical', { ...tech, potential: pot.potential, detail: { ...tech.detail, ...pot.detail }, reasons: { ...tech.reasons, ...pot.reasons }, overall: tech.technical }, FEATURE_VERSION)
             this.repo.saveScore(shot.id, 'aesthetic', { ...aes, overall: aes.aesthetic }, FEATURE_VERSION)
+            if (tech.tags && tech.tags.length > 0) {
+              this.repo.updateShot(shot.id, { tags: [...new Set([...shot.tags, ...tech.tags])] })
+            }
           })
           analyzed++
         } catch (error) {

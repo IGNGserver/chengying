@@ -71,8 +71,29 @@ export class EditOrchestrator {
       project.repo.updateTask(task.id, { usage: u })
       const route = this.rt.config.editing.childModel ?? 'session-default'
       project.repo.addUsage({ taskId: task.id, purpose: 'edit-agent', provider: this.rt.config.editing.childProvider, model: route, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens })
+      const maxTok = typeof task.options.maxTokens === 'number' ? task.options.maxTokens : this.rt.config.editing.maxTokensPerTask
+      if (maxTok > 0 && u.inputTokens + u.outputTokens >= maxTok && task.status === 'running') {
+        project.repo.updateTask(task.id, { options: { ...task.options, tokenBudgetReached: true } })
+        project.repo.addEvent(task.id, 'warn', 'budget', `token budget reached (${u.inputTokens + u.outputTokens} / ${maxTok}); stopping sub-agent`)
+        const live = this.active.get(task.id)
+        if (live !== undefined) live.abort.abort()
+      }
     })
     return () => { offCreated(); offEvent() }
+  }
+
+  /** Summarize an already-completed anchor photo in the same scene so sibling sub-agents stay stylistically consistent. */
+  sceneAnchorContext(project: Project, task: TaskRecord): string | undefined {
+    const sceneId = typeof task.options.sceneId === 'string' ? task.options.sceneId : project.repo.groupOf(task.shotId, 'scene')
+    if (sceneId === undefined) return undefined
+    const siblings = project.repo.tasks().filter(t => t.id !== task.id && t.status === 'succeeded' && (t.options.sceneId === sceneId || project.repo.groupOf(t.shotId, 'scene') === sceneId))
+    const anchor = siblings.sort((a, b) => Number(b.options.sceneAnchor === true) - Number(a.options.sceneAnchor === true))[0]
+    if (anchor === undefined || anchor.headRevision === null) return undefined
+    const rev = project.repo.revision(anchor.headRevision)
+    if (rev === undefined) return undefined
+    const stepSummary = rev.doc.stages.flatMap(st => st.steps.filter(s => s.enabled).map(s => `${st.engine}:${s.op}(${JSON.stringify(s.params).slice(0, 80)})`)).slice(0, 6)
+    const note = stepSummary.length === 0 ? 'kept unchanged (original look already balanced)' : stepSummary.join(', ')
+    return `Scene consistency (${sceneId}): sibling anchor photo ${anchor.shotId} (task ${anchor.id}) finished with [${note}]. Keep colour temperature, contrast and overall mood cohesive with it (you can inspect its style fingerprint via edit_style_reference with shot="${anchor.shotId}") while tailoring exposure, crop and local masks to this specific photo.`
   }
 
   prompt(project: Project, task: TaskRecord): string {
@@ -89,14 +110,15 @@ Measured issues: ${(tech?.issues ?? []).join(', ') || 'none'}${tech?.detail ? ` 
 Pipeline stages: ${engines}${resumed ? `\nThis task is being RESUMED: the current recipe already has edits (revision #${head.seq}). Review it with edit_task_info and continue; do not start over unless it is clearly wrong.` : ''}
 
 User brief: ${task.instructions}
-${profile.styleNotes.length > 0 ? `User taste (learned/stated): ${profile.styleNotes.join(' · ')}\n` : ''}${Object.keys(profile.look).length > 0 ? `Preferred look targets (−1..1): ${JSON.stringify(profile.look)}\n` : ''}
+${typeof task.options.sceneBrief === 'string' && task.options.sceneBrief !== '' ? `Scene-specific brief (${String(task.options.sceneId ?? task.options.segmentId ?? 'scene')}): ${task.options.sceneBrief}\n` : ''}${this.sceneAnchorContext(project, task) ? `${this.sceneAnchorContext(project, task)}\n` : ''}${profile.styleNotes.length > 0 ? `User taste (learned/stated): ${profile.styleNotes.join(' · ')}\n` : ''}${Object.keys(profile.look).length > 0 ? `Preferred look targets (−1..1): ${JSON.stringify(profile.look)}\n` : ''}Budget: at most ${typeof task.options.maxRevisions === 'number' ? task.options.maxRevisions : this.rt.config.editing.maxRevisionsPerTask} edit_apply iterations; stop as soon as the photo looks natural.
+
 How to work:
-1. edit_task_info (view=true) to see the photo, its recipe and history.
+1. edit_task_info (view=true) to see the photo, its recipe and history. If the original photo is ALREADY well-exposed, balanced and atmospheric so any cropping or grading would only degrade it, do NOT force edits — call edit_finish with status="unchanged" explaining why keeping the original is best.
 2. Find operations with edit_capabilities and read exact parameter schemas with edit_describe before using them — never guess parameter names or ranges.
 3. Edit with edit_apply (it renders a preview and statistics: check histogram/clipping, colour cast, horizon, noise). Typical order: white balance & exposure → tone (highlights/shadows/contrast) → colour → local adjustments with masks → geometry (straighten/crop/perspective) → noise reduction & sharpening.
 4. Look at every result; compare with the original (edit_preview compare=true). Revert with edit_revert when a change makes things worse.
 5. Keep the photo natural and true to the scene. Optional AI stage (add_stage engine "ai"): ai:upscale (super-resolution), ai:inpaint (remove small distractions/dust/wires with a mask, non-generative), ai:style_match (match a reference look; fingerprint from edit_style_reference). Generative changes only through edit_generate, which asks for the user's authorization; if it is refused or unavailable, continue without them.
-6. Finish with edit_finish, summarizing what you changed and why (status failed with a reason if the photo cannot be rescued).`
+6. Finish with edit_finish, summarizing what you changed and why (status="unchanged" to keep the original untouched, or status="failed" with a reason if the photo cannot be rescued).`
   }
 
   async control(project: Project, taskId: string, action: 'pause' | 'resume' | 'retry' | 'cancel'): Promise<Record<string, unknown>> {
@@ -201,8 +223,18 @@ How to work:
     project.repo.addEvent(task.id, 'info', 'agent-result', `sub-agent ended: ${outcome.stopReason}${outcome.text ? ` — ${outcome.text.slice(0, 300)}` : ''}`, { childId, diagnostic: outcome.diagnostic })
     if (now.status !== 'running') return // finished via edit_finish, or paused/cancelled meanwhile
     const edited = svc.head(task.id).doc.stages.some(s => s.steps.length > 0)
+    if (now.options.tokenBudgetReached === true) {
+      if (edited) svc.setStatus(task.id, 'succeeded', { message: 'stopped at token budget cap; kept latest revision', error: null })
+      else svc.setStatus(task.id, 'failed', { message: 'token budget exceeded without a valid edit', error: 'token budget exceeded' })
+      return
+    }
     if (outcome.stopReason === 'completed' && edited) {
       svc.setStatus(task.id, 'succeeded', { message: 'sub-agent completed (no explicit edit_finish)', error: null })
+      return
+    }
+    if (outcome.stopReason === 'completed' && !edited && /\b(unchanged|keep as[- ]is|no edit(?:s|ing)? needed|already well[- ](?:exposed|balanced)|无需修图|保持原[片样图]|原片直出)\b/i.test(outcome.text)) {
+      project.repo.updateTask(task.id, { options: { ...now.options, unchanged: true } })
+      svc.setStatus(task.id, 'succeeded', { message: `[unchanged] ${outcome.text.slice(0, 240)}`, error: null })
       return
     }
     const reason = outcome.stopReason === 'completed' ? 'sub-agent ended without editing' : `sub-agent ${outcome.stopReason}: ${outcome.diagnostic ?? ''}`.trim()

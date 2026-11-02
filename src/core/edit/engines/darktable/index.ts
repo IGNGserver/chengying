@@ -16,14 +16,14 @@ import { CatalogCache, coverageOf, fingerprintOf, validateWithCatalog } from '..
 import { normalizeParams, type ParamSchema } from '../../schema.ts'
 import { locateDarktable, type DarktableInstall } from './locate.ts'
 import { DarktableMcp, introspectNative, snapshotFor, type DtIntrospection } from './introspect.ts'
-import { decodeParams, encodeParams, paramsSchema, type DtModule } from './codec.ts'
+import { decodeParams, encodeParams, expandCurveSugar, paramsSchema, type DtModule } from './codec.ts'
 import { applyMask, BLEND_SCHEMA, blendColorspaceFor, decodeBlend, defaultBlend, encodeBlend, SUPPORTED_BLEND_VERSION, type DtForm } from './blend.ts'
 import { buildXmp, parseDtStyle, parseXmpHistory, type DtHistoryItem, type ImportedItem } from './xmp.ts'
 import { run } from '../../../util/proc.ts'
 import { ChengyingError, errorMessage } from '../../../util/errors.ts'
 import { newId, nowIso } from '../../../util/misc.ts'
 
-const CATALOG_VERSION = 5
+const CATALOG_VERSION = 6
 /** Modules the export pipeline inserts itself and drops from any supplied history (output size comes from the render request). */
 const PIPELINE_INTERNAL = new Set(['finalscale'])
 const FLAGS = { blending: 1 << 1, deprecated: 1 << 2, hidden: 1 << 5, oneInstance: 1 << 7, noHistory: 1 << 9, noMasks: 1 << 10 }
@@ -249,7 +249,8 @@ export class DarktableEngine implements EngineAdapter {
         if (typeof step.params.$version === 'number') modversion = step.params.$version
       } else {
         const { step: v } = this.validateStep(step, catalog)
-        params = this.mcp !== undefined ? await this.mcp.encode(m.operation, v.params) : encodeParams(m, v.params)
+        const expandedParams = expandCurveSugar(m.operation, v.params)
+        params = this.mcp !== undefined ? await this.mcp.encode(m.operation, expandedParams) : encodeParams(m, expandedParams)
       }
       const op = catalog.operations.find(o => o.id === step.op)
       let blendopParams: Buffer | undefined

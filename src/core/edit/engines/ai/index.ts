@@ -82,6 +82,7 @@ export class AiEngine implements EngineAdapter {
   private cached: Catalog | undefined
   private probed: EngineProbe | undefined
   private srAvailable = false
+  private resolvedSr: { command: string; args?: string[]; model?: string; timeoutMs?: number } | undefined
 
   constructor(private readonly opts: AiEngineOptions) {}
 
@@ -90,9 +91,20 @@ export class AiEngine implements EngineAdapter {
     const binaries: Record<string, string> = {}
     const sr = this.opts.superResolution
     this.srAvailable = false
+    this.resolvedSr = undefined
     if (sr?.command !== undefined && sr.command !== '') {
       binaries.superResolution = sr.command
       this.srAvailable = await commandExists(sr.command)
+      if (this.srAvailable) this.resolvedSr = { command: sr.command, args: sr.args, model: sr.model, timeoutMs: sr.timeoutMs }
+    } else {
+      for (const candidate of ['realesrgan-ncnn-vulkan', 'waifu2x-ncnn-vulkan']) {
+        if (await commandExists(candidate)) {
+          binaries.superResolution = candidate
+          this.srAvailable = true
+          this.resolvedSr = { command: candidate, args: ['-i', '{input}', '-o', '{output}', '-s', '{scale}'] }
+          break
+        }
+      }
     }
     for (const c of this.opts.commands ?? []) binaries[c.id] = c.command
     this.probed = {
@@ -109,7 +121,7 @@ export class AiEngine implements EngineAdapter {
     const operations: OperationSpec[] = [
       {
         id: 'upscale', title: 'Super-resolution upscale', category: 'ai/detail', version: 1, masks: [], multiInstance: false, tags: ['non-generative'],
-        description: `Enlarge the image by "scale". method "model" runs the configured super-resolution CLI${this.srAvailable ? ` (${this.opts.superResolution?.command})` : ' (not configured on this host)'}; "lanczos" is classical Lanczos3 with edge-aware sharpening; "auto" picks the model when available. Previews are shown at preview size; exports get the full enlarged resolution.`,
+        description: `Enlarge the image by "scale". method "model" runs a neural super-resolution CLI${this.srAvailable ? ` (available: ${this.resolvedSr?.command})` : ' (UNAVAILABLE on this host — install realesrgan-ncnn-vulkan or configure superResolution.command; auto will fall back to classical Lanczos3+sharpening)'}; "lanczos" is classical Lanczos3 interpolation with luminance detail sharpening (not neural SR); "auto" picks the neural model when available.`,
         params: { type: 'object', additionalProperties: false, properties: {
           scale: num(1, 4, 2, 'enlargement factor'),
           method: { type: 'string', enum: ['auto', 'lanczos', 'model'], default: 'auto', description: 'upscaling backend' },
@@ -283,6 +295,9 @@ export class AiEngine implements EngineAdapter {
     if (method === 'model') {
       out = await this.runSuperResolution(img, s, req)
     } else {
+      if (p.method === 'auto' && !this.srAvailable) {
+        warnings.push('upscale used classical Lanczos3 + sharpening fallback (no neural super-resolution CLI found; install realesrgan-ncnn-vulkan or set superResolution.command)')
+      }
       out = await resizeLanczos(img, Math.round(img.width * s), Math.round(img.height * s))
       const k = Number(p.sharpen ?? 0.25)
       if (k > 0) out = unsharp(out, 1.0 * s / 2, k)
@@ -295,7 +310,7 @@ export class AiEngine implements EngineAdapter {
   }
 
   private async runSuperResolution(img: FImage, scale: number, req: RenderRequest): Promise<FImage> {
-    const sr = this.opts.superResolution as { command: string; args?: string[]; model?: string; timeoutMs?: number }
+    const sr = (this.resolvedSr ?? this.opts.superResolution) as { command: string; args?: string[]; model?: string; timeoutMs?: number }
     const native = Math.max(2, Math.min(4, Math.ceil(scale - 1e-6)))
     const cacheDir = join(this.opts.workDir, 'cache')
     mkdirSync(cacheDir, { recursive: true })

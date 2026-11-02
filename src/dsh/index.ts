@@ -41,8 +41,8 @@ export const WORKFLOW_PROMPT = `# 澄影 Chengying 摄影后期工作流
 筛图：photo_cull_run（quality 默认跟随计划：fast 只做传统评分，balanced 加 VLM 候选，thorough 加专用模型和全量 VLM）→ photo_view 看联系表 → photo_select 把用户原话转成数量/阈值/偏好。若计划要求选片后确认，photo_select 会提示 checkpoint：先给用户看选片结果，得到确认后再 edit_tasks_create({confirm:true})。
 
 修图：
-- engine/hybrid：edit_tasks_create → edit_run。每张照片一个子 Agent，用编辑引擎的完整参数 schema 逐项修改，edit_apply 立即出预览，edit_revert 可回退；完成后 edit_finish。
-- generative：不要走 edit_run；调用 photo_ai_redraw。先用 gen_authorize({max_uses: 张数}) 让用户一次授权整批，再跑批量重绘；若计划要求选片后确认，调用时带 confirm:true；导出会带生成内容标记。
+- engine / hybrid（推荐需要 RAW 调色 + 局部智能消除/补全/超分时使用 hybrid）：edit_tasks_create（可传 scene_instructions 为不同场景如日落/夜景/人像定制统一风格策略，多图场景会自动先修锚点照片以保持全组色调统一）→ edit_run。每张照片一个子 Agent，用编辑引擎完整参数 schema（含 darktable 曲线的 curves 点对语法与局部蒙版）逐项修改，edit_apply 出预览，edit_revert 可回退；原片已经足够好时子 Agent 可用 edit_finish(status="unchanged") 拒绝过度修图；hybrid 下子 Agent 还可在引擎调色后按需调用 ai 阶段工具或经用户授权的 edit_generate 做局部生成式消除/重绘。
+- generative（仅用于整批全图风格化 AI 重绘）：不要走 edit_run；先 gen_authorize({max_uses: 张数}) 让用户一次授权整批，再调 photo_ai_redraw；若计划要求选片后确认，调用时带 confirm:true；导出会带生成内容标记。
 - 引擎工具很多：先用 edit_capabilities / edit_describe 查清参数，再 edit_apply；不要猜参数名。
 
 交付：photo_deliver（默认沿用计划中的 outputDir 和 deliverMode）。

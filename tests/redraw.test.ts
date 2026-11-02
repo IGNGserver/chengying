@@ -52,7 +52,7 @@ await sharp(input).png().toFile(output)
       stateRoot: state,
       ui: { enabled: false, basePath: '/api/chengying' },
       generative: { providers: [{ id: 'fake', type: 'command', command: process.execPath, args: [join(tools, 'fake-gen.mjs'), '{input}', '{mask}', '{output}', '{prompt}'] }], requireApproval: true },
-      editing: { subagentProvider: 'spawn', maxConcurrent: 2, maxAttempts: 3, previewEdge: 1400 },
+      editing: { subagentProvider: 'spawn', maxConcurrent: 2, maxAttempts: 3, maxRevisionsPerTask: 8, maxTokensPerTask: 120_000, previewEdge: 1400 },
     }), console)
     const project = rt.openProject(root, 'agent_redraw')
     await project.scan()

@@ -14,9 +14,9 @@
 `photo_workspace_open` 指定工作目录 → `photo_cull_run`：
 
 - 扫描图片（JPEG/HEIF/TIFF/PNG 及主流 RAW），用 ExifTool 读取拍摄时间、时区、GPS、相机/镜头、曝光参数；RAW 与机内 JPEG 自动配对为同一张"照片"。
-- 生成预览（优先内嵌预览，回退到 libvips / sips），在 worker 池中计算像素特征：清晰度（对比度归一化）、曝光/高光/暗部裁切、噪声、色彩、构图（三分法/水平线/主体显著性）、感知哈希等。
+- 生成预览（优先内嵌预览，回退到 libvips / sips），在 worker 池中计算像素特征：清晰度（对比度归一化 + 人像/主体框局部锐度）、人像面部分布与闭眼疑似检测、曝光与单通道/全通道裁切及暗部纹理余量、噪声、色彩、构图（三分法/水平线/主体显著性）、感知哈希等。
 - 分组：精确重复（内容哈希）、近似重复（pHash/dHash）、相似场景（颜色与 Lab 缩略图）、按时间与地点切分的行程片段。
-- 评分：传统视觉评分 + 可选专用模型（`models`：command / http / onnx 打分器）+ 可选视觉大模型（`photo_vlm_score`，联系表批量打分，覆盖技术质量、美学、构图、内容价值、后期潜力）。
+- 评分：传统视觉评分（含基于传感器位深、ISO 与通道裁切余量的 RAW 后期潜力估算）+ 专用模型（`models`：内置高分辨率人像复检 `builtin` 及 command / http / onnx 打分器）+ 视觉大模型（`photo_vlm_score`，默认挑选连拍组前两名同表对比表情/闭眼与高分候选，上传云端时默认脱敏精确 GPS）。
 - 选片：`photo_select` 把自然语言（"选 30 张最好的""4 分以上全要""多留人像少要重复的日落"）解析成数量/阈值/偏好，按 MMR 兼顾质量、场景多样性和行程叙事（每个片段的配额）。数量与阈值都不设上限。
 - 人工调整：`photo_selection` / `photo_flag` 增删、锁定、标记；用户的取舍会作为偏好学习，影响后续评分。
 - **从不删除原图**：重复与淘汰只是标记。
@@ -26,7 +26,7 @@
 - `edit_tasks_create` 为每张入选照片建立一个**独立、可恢复的修图任务**（优先 RAW）。
 - `edit_run` 按需拉起 DSH 子 Agent（`ctx.subagents`，默认 `spawn` 提供者），并发受 `editing.maxConcurrent` 限制；每个子 Agent 只拿到绑定该任务的工具，看不到 shell、文件系统和其他任务。
 - `edit_task` 支持暂停/恢复/重试/取消；失败按 `editing.maxAttempts` 自动重试；子 Agent 的模型用量逐任务记录。
-- 子 Agent 的工作循环：`edit_task_info` 看图与历史 → `edit_capabilities` / `edit_describe` 查操作和完整参数 schema → `edit_apply` 原子地应用一组操作并立刻得到预览与直方图/裁切/饱和度统计 → `edit_preview`（与原图对比）→ 不满意就 `edit_revert` → `edit_finish` 写总结。
+- 子 Agent 的工作循环：`edit_task_info` 看图与历史 → `edit_capabilities` / `edit_describe` 查操作和完整参数 schema（darktable 曲线模块支持 `curves` 点对高层语法）→ `edit_apply` 原子地应用操作并立刻得到预览与统计（受单任务修订次数与 Token 预算上限保护）→ `edit_preview`（与原图对比）→ 不满意就 `edit_revert` → `edit_finish` 写总结（若原图已足够好可传 `status: "unchanged"` 原片直出，拒绝过度修图）。支持 `scene_instructions` 场景级策略与多图场景锚点照片先行修图协同。
 - 多阶段管线：例如 darktable 显影 RAW → 内置引擎精修 → AI 阶段；每个阶段的配方都以引擎原生格式（XMP / pp3 / JSON）保存。
 
 ### 3. 高级智能后期（AI 阶段，引擎 `ai`）

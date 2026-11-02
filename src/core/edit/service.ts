@@ -114,7 +114,7 @@ export class EditService {
     return { fileId: f.id, path: this.project.guard.readable(f.path), kind: f.kind }
   }
 
-  async createTasks(opts: { selectionId?: string; shotIds?: string[]; instructions: string; engine?: string; stageOptions?: Record<string, unknown>; priority?: number; maxAttempts?: number; force?: boolean; extraStages?: Array<{ engine: string; options?: Record<string, unknown> }> }): Promise<{ created: TaskRecord[]; existing: TaskRecord[] }> {
+  async createTasks(opts: { selectionId?: string; shotIds?: string[]; instructions: string; sceneInstructions?: Record<string, string>; maxRevisions?: number; maxTokens?: number; engine?: string; stageOptions?: Record<string, unknown>; priority?: number; maxAttempts?: number; force?: boolean; extraStages?: Array<{ engine: string; options?: Record<string, unknown> }> }): Promise<{ created: TaskRecord[]; existing: TaskRecord[] }> {
     let ids = opts.shotIds ?? []
     if (opts.selectionId !== undefined) {
       const sel = this.project.repo.selection(opts.selectionId)
@@ -125,6 +125,19 @@ export class EditService {
     if (ids.length === 0) throw new ChengyingError('invalid-argument', 'no photos to edit (pass a selection or shot ids)')
     const created: TaskRecord[] = []
     const existing: TaskRecord[] = []
+    // Count how many shots belong to each scene so multi-photo scenes get an anchor task scheduled first.
+    const sceneMembers = new Map<string, string[]>()
+    for (const shotId of ids) {
+      const sc = this.project.repo.groupOf(shotId, 'scene')
+      if (sc !== undefined) sceneMembers.set(sc, [...(sceneMembers.get(sc) ?? []), shotId])
+    }
+    const anchorShots = new Set<string>()
+    for (const [, list] of sceneMembers) {
+      if (list.length >= 2) {
+        const best = [...list].sort((a, b) => this.project.rankOf(b) - this.project.rankOf(a))[0]
+        if (best !== undefined) anchorShots.add(best)
+      }
+    }
     for (const shotId of ids) {
       const shot = this.project.repo.shot(shotId)
       if (shot === undefined) throw new ChengyingError('not-found', `no shot ${shotId}`)
@@ -136,9 +149,23 @@ export class EditService {
       const src = this.sourceFor(shot, probe.inputs.raw ? kind : 'raster')
       const stages: EditStage[] = [{ id: newId('stage'), engine, steps: [], ...(opts.stageOptions ? { options: opts.stageOptions } : {}) }]
       for (const extra of opts.extraStages ?? []) stages.push({ id: newId('stage'), engine: extra.engine, steps: [], ...(extra.options ? { options: extra.options } : {}) })
+      const sceneId = this.project.repo.groupOf(shotId, 'scene') ?? null
+      const segmentId = this.project.repo.groupOf(shotId, 'segment') ?? null
+      const sceneMap = opts.sceneInstructions ?? {}
+      const sceneBrief = sceneMap[shotId] ?? (sceneId ? sceneMap[sceneId] : undefined) ?? (segmentId ? sceneMap[segmentId] : undefined)
+      const isAnchor = anchorShots.has(shotId)
+      const taskOptions: Record<string, unknown> = {
+        ...(sceneId ? { sceneId } : {}),
+        ...(segmentId ? { segmentId } : {}),
+        ...(sceneBrief ? { sceneBrief } : {}),
+        ...(isAnchor ? { sceneAnchor: true } : {}),
+        ...(opts.maxRevisions !== undefined ? { maxRevisions: opts.maxRevisions } : {}),
+        ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+      }
       const task = this.project.repo.createTask({
-        kind: 'edit', shotId, selectionId: opts.selectionId ?? null, status: 'queued', priority: opts.priority ?? 0, engine,
-        instructions: opts.instructions, options: {}, maxAttempts: opts.maxAttempts ?? 3,
+        kind: 'edit', shotId, selectionId: opts.selectionId ?? null, status: 'queued',
+        priority: (opts.priority ?? 0) + (isAnchor ? 10 : 0), engine,
+        instructions: opts.instructions, options: taskOptions, maxAttempts: opts.maxAttempts ?? 3,
       })
       const doc: EditDocument = { schema: 1, sourceFile: src.fileId, stages }
       this.project.repo.addRevision(task.id, null, doc, `created (${engine}, ${src.kind} source)`, 'system')
@@ -168,9 +195,16 @@ export class EditService {
   }
 
   /** Apply operations atomically: everything validates, or nothing changes. */
-  async applyOps(taskId: string, ops: EditOp[], meta: { author: string; message?: string; signal?: AbortSignal }): Promise<{ revision: RevisionRecord; warnings: string[] }> {
+  async applyOps(taskId: string, ops: EditOp[], meta: { author: string; message?: string; signal?: AbortSignal; maxRevisions?: number }): Promise<{ revision: RevisionRecord; warnings: string[] }> {
     const task = this.task(taskId)
     if (task.status === 'cancelled') throw new ChengyingError('conflict', 'task is cancelled')
+    const maxRev = meta.maxRevisions ?? (typeof task.options.maxRevisions === 'number' ? task.options.maxRevisions : undefined)
+    if (maxRev !== undefined && maxRev > 0 && meta.author.startsWith('agent')) {
+      const agentEdits = this.project.repo.revisions(taskId).filter(r => r.author.startsWith('agent') && !r.message.startsWith('checkout #')).length
+      if (agentEdits >= maxRev) {
+        throw new ChengyingError('conflict', `revision budget reached (${maxRev} edits on task ${taskId}); use edit_preview/edit_revert if needed and finish with edit_finish`)
+      }
+    }
     const head = this.head(taskId)
     const doc = structuredClone(head.doc)
     const warnings: string[] = []
