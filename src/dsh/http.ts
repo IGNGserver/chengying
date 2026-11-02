@@ -9,7 +9,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
 import type { ChengyingRuntime } from './runtime.ts'
 import type { ConnectionService, HostContext, WebServerService } from './host-types.ts'
-import { shotRow } from './tools/cull.ts'
+import { selectVlmCandidates, shotRow } from './tools/cull.ts'
 import { mergeDims } from '../core/select/selector.ts'
 import { parseSelectionRequest } from '../core/select/nl.ts'
 import { isInside } from '../core/fsguard.ts'
@@ -128,7 +128,16 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
         const scan = await project.scan({ signal, onProgress })
         const previews = await project.buildPreviews({ force: body.force, signal, onProgress })
         const analyze = await project.analyze({ force: body.force, signal, onProgress })
-        return { scan, previews: { built: previews.built, failed: previews.failed.length }, analyze: { analyzed: analyze.analyzed, failed: analyze.failed.length } }
+        let vlm: unknown
+        if (rt.config.vlm.enabled) {
+          const ids = selectVlmCandidates(project, 120, body.force === true)
+          try {
+            vlm = await rt.vlmScore(project, ids, undefined, { signal, progress: (d, t) => progress('vlm', d, t) })
+          } catch (error) {
+            vlm = { skipped: true, error: errorMessage(error) }
+          }
+        }
+        return { scan, previews: { built: previews.built, failed: previews.failed.length }, analyze: { analyzed: analyze.analyzed, failed: analyze.failed.length }, vlm }
       })
       return { activityId: a.id }
     })
@@ -153,7 +162,10 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
       const day = q.get('day')
       if (day) shots = shots.filter(s => s.day === day)
       const issue = q.get('issue')
-      const rows = shots.map(s => ({ s, d: mergeDims(project.repo.scores(s.id)) })).filter(r => !issue || r.d.issues.includes(issue))
+      const minScore = q.get('min_score') !== null && q.get('min_score') !== '' ? Number(q.get('min_score')) : undefined
+      const rows = shots.map(s => ({ s, d: mergeDims(project.repo.scores(s.id)) }))
+        .filter(r => !issue || r.d.issues.includes(issue))
+        .filter(r => minScore === undefined || Number.isNaN(minScore) || ((r.d.technical ?? 0) + (r.d.aesthetic ?? 0)) / 2 >= minScore)
       const sort = q.get('sort') ?? 'time'
       if (sort !== 'time') rows.sort((a, b) => ((b.d[sort as 'technical'] ?? ((b.d.technical ?? 0) + (b.d.aesthetic ?? 0)) / 2) - (a.d[sort as 'technical'] ?? ((a.d.technical ?? 0) + (a.d.aesthetic ?? 0)) / 2)))
       const offset = Number(q.get('offset') ?? 0)

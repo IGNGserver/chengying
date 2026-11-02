@@ -76,4 +76,11 @@ h4{margin:12px 0 6px;font-size:12px;color:var(--dsw-alias-label-secondary);font-
 .cy-log{font-family:ui-monospace,Menlo,monospace;font-size:11px;max-height:320px;overflow:auto;background:var(--dsw-alias-bg-layer-2);border-radius:8px;padding:6px}
 .cy-log-error{color:var(--dsw-alias-state-error-primary)}
 .cy-log-warn{color:var(--dsw-alias-state-warn-primary)}
+
+.cy-group-card { border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 8px; margin-bottom: 10px; background: rgba(255,255,255,0.02); }
+.cy-group-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 6px; margin-top: 6px; }
+.cy-lightbox { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.86); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+.cy-lightbox .cy-compare { max-width: 92vw; max-height: 82vh; width: auto; }
+.cy-lightbox .cy-compare img { max-height: 80vh; width: auto; object-fit: contain; }
+.cy-range { width: 72px; vertical-align: middle; }
 `

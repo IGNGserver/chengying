@@ -148,7 +148,11 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
       async run(args, exec) {
         const { project, taskId } = resolve(args, exec)
         const svc = rt.edit(project)
-        const { revision, warnings } = await svc.applyOps(taskId, args.ops, { author: exec.agent?.id === undefined ? 'agent' : `agent:${exec.agent.id.slice(0, 8)}`, message: args.message, signal: exec.signal })
+        const taskRec = project.repo.task(taskId)
+        const maxRev = typeof taskRec?.options.maxRevisions === 'number' ? taskRec.options.maxRevisions : rt.config.editing.maxRevisionsPerTask
+        const { revision, warnings } = await svc.applyOps(taskId, args.ops, { author: exec.agent?.id === undefined ? 'agent' : `agent:${exec.agent.id.slice(0, 8)}`, message: args.message, signal: exec.signal, maxRevisions: maxRev })
+        const usedEdits = project.repo.revisions(taskId).filter(r => r.author.startsWith('agent') && !r.message.startsWith('checkout #')).length
+        if (maxRev > 0 && usedEdits >= maxRev - 1) warnings.push(`budget notice: ${Math.max(0, maxRev - usedEdits)} edit_apply iteration(s) remaining; finalize with edit_finish soon`)
         const out: Record<string, unknown> = { revision: { id: revision.id, seq: revision.seq, message: revision.message }, warnings, steps: revision.doc.stages.map((s, i) => ({ stage: i, engine: s.engine, steps: s.steps.map(x => ({ id: x.id, op: x.op, params: x.params, mask: x.mask === undefined ? undefined : true, enabled: x.enabled, instance: x.instance })) })) }
         if (args.preview !== false) {
           const r = await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
@@ -191,18 +195,30 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
 
     defineTool<{ task?: string; project?: string; summary: string; status?: string }>({
       name: 'edit_finish',
-      description: 'Finish the task: summarize what you changed and why. status "succeeded" (default) or "failed" with the reason when the photo cannot be improved meaningfully.',
-      parameters: obj({ ...taskParam, ...extra, summary: str('What was done and why.'), status: strEnum(['succeeded', 'failed'], 'outcome') }, [...req, 'summary']),
+      description: 'Finish the task: summarize what you changed and why. status="succeeded" (default), status="unchanged" when the original photo is already well-balanced and retouching would harm its natural look (restores empty recipe if needed and keeps original), or status="failed" when the photo is unrecoverable.',
+      parameters: obj({ ...taskParam, ...extra, summary: str('What was done (or why kept unchanged) and why.'), status: strEnum(['succeeded', 'unchanged', 'failed'], 'outcome') }, [...req, 'summary']),
       async run(args, exec) {
         const { project, taskId } = resolve(args, exec)
         const svc = rt.edit(project)
-        const head = svc.head(taskId)
-        if ((args.status ?? 'succeeded') === 'succeeded') {
+        const rawStatus = args.status ?? 'succeeded'
+        let head = svc.head(taskId)
+        const hasSteps = head.doc.stages.some(s => s.steps.some(st => st.enabled))
+        const unchanged = rawStatus === 'unchanged' || (rawStatus === 'succeeded' && !hasSteps)
+        if (rawStatus === 'unchanged' && hasSteps) {
+          const initial = project.repo.revisions(taskId)[0]
+          if (initial !== undefined) head = svc.checkout(taskId, initial.id, 'agent')
+        }
+        const task = project.repo.task(taskId)
+        if (task !== undefined) {
+          project.repo.updateTask(taskId, { options: { ...task.options, unchanged } })
+        }
+        const finalStatus: 'succeeded' | 'failed' = rawStatus === 'failed' ? 'failed' : 'succeeded'
+        if (finalStatus === 'succeeded') {
           await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
         }
-        svc.setStatus(taskId, (args.status ?? 'succeeded') as 'succeeded' | 'failed', { message: args.summary, ...(args.status === 'failed' ? { error: args.summary } : { error: null }) })
-        project.repo.addEvent(taskId, 'info', 'summary', args.summary, { revision: head.id })
-        return { task: taskId, status: args.status ?? 'succeeded', revision: head.seq }
+        svc.setStatus(taskId, finalStatus, { message: unchanged ? `[unchanged] ${args.summary}` : args.summary, ...(finalStatus === 'failed' ? { error: args.summary } : { error: null }) })
+        project.repo.addEvent(taskId, 'info', unchanged ? 'unchanged' : 'summary', args.summary, { revision: head.id, unchanged })
+        return { task: taskId, status: finalStatus, unchanged, revision: head.seq }
       },
     }),
   ]
@@ -210,12 +226,16 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
 
 export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
   return [
-    defineTool<{ project?: string; selection?: string; shots?: string[]; instructions: string; engine?: string; finish_with_builtin?: boolean; ai_stage?: boolean; stage_options?: Record<string, unknown>; force?: boolean; confirm?: boolean }>({
+    defineTool<{ project?: string; selection?: string; shots?: string[]; instructions: string; scene_instructions?: Record<string, string>; max_revisions?: number; max_tokens?: number; engine?: string; finish_with_builtin?: boolean; ai_stage?: boolean; stage_options?: Record<string, unknown>; force?: boolean; confirm?: boolean }>({
       name: 'edit_tasks_create',
-      description: 'Create one resumable retouching task per photo (from a selection and/or shot ids). Each task starts from the best source (RAW when the engine can develop it) with an empty recipe. Instructions are given to the editing sub-agents verbatim, together with the user\'s preference profile. When the session plan has an after-selection checkpoint, the first call returns needsConfirmation without creating tasks; call again with confirm=true after the user approves.',
+      description: 'Create one resumable retouching task per photo (from a selection and/or shot ids). Each task starts from the best source (RAW when the engine can develop it) with an empty recipe. Supports scene_instructions (mapping scene_xxxx / segment_xxxx / shot id to a scene-specific style brief; multi-photo scenes automatically schedule an anchor photo first so sibling sub-agents stay consistent) and per-task revision/token budgets. When the session plan has an after-selection checkpoint, the first call returns needsConfirmation without creating tasks; call again with confirm=true after the user approves.',
       parameters: obj({
         project: projectArg, selection: str('Selection id (default: latest).'), shots: arr(str('shot id'), 'Explicit shots.'),
-        instructions: str('Retouching brief (style, priorities, constraints).'), engine: strEnum(['auto', 'darktable', 'rawtherapee', 'builtin'], 'Engine for development (default auto: darktable → RawTherapee → built-in).'),
+        instructions: str('Album-wide retouching brief (style, priorities, constraints).'),
+        scene_instructions: anyJson('Optional map of { "<scene_id|segment_id|shot_id>": "<scene-specific style brief>" }, e.g. {"scene_0002":"preserve warm sunset glow, lift foreground shadows gently"}.'),
+        max_revisions: int('Optional per-task edit_apply revision limit (overrides editing.maxRevisionsPerTask).'),
+        max_tokens: int('Optional per-task token budget cap (overrides editing.maxTokensPerTask).'),
+        engine: strEnum(['auto', 'darktable', 'rawtherapee', 'builtin'], 'Engine for development (default auto: darktable → RawTherapee → built-in).'),
         finish_with_builtin: bool('Add a built-in finishing stage after RAW development.'), ai_stage: bool('Add an (initially empty) AI stage at the end (super-resolution, inpainting, style match).'), stage_options: anyJson('Options for the first stage (see edit_describe stage_options).'), force: bool('Create new tasks even when a task exists for a photo.'), confirm: bool('Confirm the selection checkpoint and create tasks now.'),
       }, ['instructions']),
       async run(args, exec) {
@@ -235,9 +255,10 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
             note: 'The session plan requires a checkpoint after selection. Show the selection/contact sheet to the user; call edit_tasks_create again with confirm=true only after approval.',
           }
         }
-        const r = await rt.edit(project).createTasks({ selectionId, shotIds: args.shots, instructions: args.instructions, engine: args.engine, stageOptions: args.stage_options, force: args.force, extraStages: [...(args.finish_with_builtin ? [{ engine: 'builtin' }] : []), ...(args.ai_stage ? [{ engine: 'ai' }] : [])] })
+        const includeAiStage = args.ai_stage ?? (plan?.retouch === 'hybrid')
+        const r = await rt.edit(project).createTasks({ selectionId, shotIds: args.shots, instructions: args.instructions, sceneInstructions: args.scene_instructions, maxRevisions: args.max_revisions, maxTokens: args.max_tokens, engine: args.engine, stageOptions: args.stage_options, force: args.force, extraStages: [...(args.finish_with_builtin ? [{ engine: 'builtin' }] : []), ...(includeAiStage ? [{ engine: 'ai' }] : [])] })
         rt.updatePlanStage(project, exec, 'retouching')
-        return { created: r.created.map(t => ({ id: t.id, shot: t.shotId, engine: t.engine })), existing: r.existing.map(t => ({ id: t.id, shot: t.shotId, status: t.status })), next: 'Run edit_run to let editing sub-agents work on queued tasks.' }
+        return { created: r.created.map(t => ({ id: t.id, shot: t.shotId, engine: t.engine, scene: t.options.sceneId, sceneAnchor: t.options.sceneAnchor === true || undefined })), existing: r.existing.map(t => ({ id: t.id, shot: t.shotId, status: t.status })), next: 'Run edit_run to let editing sub-agents work on queued tasks.' }
       },
     }),
 
@@ -287,7 +308,7 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
       },
     }),
 
-    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; dir?: string; mode?: 'originals' | 'rendered'; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; source?: 'raster' | 'raw' | 'both'; manifest?: boolean; overwrite?: boolean; background?: boolean }>({
+    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; dir?: string; mode?: 'originals' | 'rendered'; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; source?: 'raster' | 'raw' | 'both'; include_raw?: boolean; c2pa?: boolean; manifest?: boolean; overwrite?: boolean; background?: boolean }>({
       name: 'export_run',
       description: 'Low-level export: rendered photos (default: latest selection; edited from their latest revision, unedited from the engine default) at full resolution with metadata verification and _recipes/, or originals copied byte-for-byte. Prefer photo_deliver for a plan-driven delivery; export_run supports the same dir/mode/manifest arguments.',
       parameters: obj({
@@ -297,6 +318,8 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
         format: strEnum(['jpeg', 'tiff', 'png'], 'default jpeg'), quality: int('JPEG quality (default 95).'), max_edge: int('Downscale long edge (default full resolution).'),
         subdir: str('Sub-folder inside the export directory.'), naming: strEnum(['original', 'datetime'], 'File naming.'),
         source: strEnum(['raster', 'raw', 'both'], 'For originals: camera JPEG, RAW, or both.'),
+        include_raw: bool('Also copy the paired RAW original alongside the rendered export.'),
+        c2pa: bool('Write a C2PA content-credentials manifest and sign with c2patool when available.'),
         manifest: bool('Write manifest.json (default true).'), overwrite: bool('Replace this project’s earlier export (default true).'),
         background: bool('Run as background job.'),
       }),
@@ -305,7 +328,7 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
         const result = await runDelivery(rt, project, exec, {
           selection: args.selection, tasks: args.tasks, shots: args.shots, dir: args.dir ?? project.exportDir, mode: args.mode ?? 'rendered',
           manifest: args.manifest, format: args.format as 'jpeg', quality: args.quality, maxEdge: args.max_edge,
-          subdir: args.subdir, naming: args.naming as 'original', source: args.source, overwrite: args.overwrite, background: args.background,
+          subdir: args.subdir, naming: args.naming as 'original', source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background,
         })
         // Preserve export_run's compact item shape for existing agents.
         if (result.mode === 'inline' && result.deliveryMode === 'rendered' && Array.isArray(result.items)) {

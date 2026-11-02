@@ -129,6 +129,8 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
       subdir?: string
       naming?: 'original' | 'datetime'
       source?: 'raster' | 'raw' | 'both'
+      include_raw?: boolean
+      c2pa?: boolean
       overwrite?: boolean
       background?: boolean
     }>({
@@ -148,6 +150,8 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         subdir: str('Sub-folder inside the delivery directory.'),
         naming: strEnum(['original', 'datetime'], 'File naming.'),
         source: strEnum(['raster', 'raw', 'both'], 'For originals: camera JPEG, RAW, or both.'),
+        include_raw: bool('For rendered mode: also copy the paired RAW original alongside the rendered export.'),
+        c2pa: bool('For rendered mode: write a C2PA content-credentials manifest and sign with c2patool when available.'),
         overwrite: bool('Replace this project’s earlier export with the same name (default true).'),
         background: bool('Run as a background job.'),
       }),
@@ -156,7 +160,7 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         return await runDelivery(rt, project, exec, {
           selection: args.selection, tasks: args.tasks, shots: args.shots, dir: args.dir, mode: args.mode,
           manifest: args.manifest, format: args.format, quality: args.quality, maxEdge: args.max_edge,
-          subdir: args.subdir, naming: args.naming, source: args.source, overwrite: args.overwrite, background: args.background,
+          subdir: args.subdir, naming: args.naming, source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background,
         })
       },
     }),

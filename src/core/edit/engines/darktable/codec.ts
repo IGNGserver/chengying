@@ -125,9 +125,178 @@ function defaultsOf(s: ParamSchema): unknown {
   return s.default
 }
 
+
+/**
+ * High-level spline curve descriptors for darktable modules whose native C
+ * structs represent curves as fixed-length 2D node arrays + node-count arrays
+ * + curve-type arrays. Full native fields remain 100% accessible; the `curves`
+ * property lets an AI agent pass natural `[[x, y], ...]` control points per
+ * channel (just like in Photoshop / RawTherapee) without hand-filling 60 slots.
+ */
+export interface DtCurveDescriptor {
+  nodesField: string
+  countField: string
+  typeField: string
+  channels: readonly string[]
+  aliases?: Readonly<Record<string, number>>
+  /** Default y endpoint [y0, y1] for untouched channels ([0,1] for tone/rgb curves, [0.5,0.5] for colorzones). */
+  identityY: [number, number]
+  /** Default spline interpolation type (2 = MONOTONE_HERMITE in darktable). */
+  defaultCurveType: number
+  maxNodes: number
+}
+
+export const DT_CURVE_MODULES: Readonly<Record<string, DtCurveDescriptor>> = {
+  tonecurve: {
+    nodesField: 'tonecurve',
+    countField: 'tonecurve_nodes',
+    typeField: 'tonecurve_type',
+    channels: ['L', 'a', 'b'],
+    aliases: { l: 0, luminance: 0, master: 0, a: 1, b: 2 },
+    identityY: [0, 1],
+    defaultCurveType: 2,
+    maxNodes: 20,
+  },
+  rgbcurve: {
+    nodesField: 'curve_nodes',
+    countField: 'curve_num_nodes',
+    typeField: 'curve_type',
+    channels: ['r', 'g', 'b'],
+    aliases: { master: -1, all: -1, rgb: -1, r: 0, red: 0, g: 1, green: 1, b: 2, blue: 2 },
+    identityY: [0, 1],
+    defaultCurveType: 2,
+    maxNodes: 20,
+  },
+  basecurve: {
+    nodesField: 'basecurve',
+    countField: 'basecurve_nodes',
+    typeField: 'basecurve_type',
+    channels: ['r', 'g', 'b'],
+    aliases: { master: 0, l: 0, r: 0, g: 1, b: 2 },
+    identityY: [0, 1],
+    defaultCurveType: 2,
+    maxNodes: 20,
+  },
+  colorzones: {
+    nodesField: 'curve',
+    countField: 'curve_num_nodes',
+    typeField: 'curve_type',
+    channels: ['lightness', 'saturation', 'hue'],
+    aliases: { lightness: 0, l: 0, saturation: 1, sat: 1, s: 1, hue: 2, h: 2 },
+    identityY: [0.5, 0.5],
+    defaultCurveType: 2,
+    maxNodes: 20,
+  },
+}
+
+const POINT_ARRAY_SCHEMA: ParamSchema = {
+  type: 'array',
+  description: 'Control points [[x, y], ...] with x, y in 0..1 (2 to 20 points, sorted by x).',
+  minItems: 2,
+  maxItems: 20,
+  items: {
+    type: 'array',
+    minItems: 2,
+    maxItems: 2,
+    items: { type: 'number', minimum: 0, maximum: 1 },
+  },
+}
+
+function curveSugarSchema(op: string): ParamSchema | undefined {
+  const desc = DT_CURVE_MODULES[op]
+  if (desc === undefined) return undefined
+  const properties: Record<string, ParamSchema> = {}
+  for (const ch of desc.channels) properties[ch] = POINT_ARRAY_SCHEMA
+  if (desc.aliases && 'master' in desc.aliases) {
+    properties.master = { ...POINT_ARRAY_SCHEMA, description: 'Apply the same [[x, y], ...] curve across channels.' }
+  }
+  return {
+    type: 'object',
+    additionalProperties: false,
+    description: `High-level spline control points per channel (${desc.channels.join(', ')}). Automatically populates ${desc.nodesField}, ${desc.countField} and ${desc.typeField} with monotone Hermite splines and keeps unedited channels at neutral identity.`,
+    properties,
+  }
+}
+
+/** Expand high-level `params.curves` into darktable's native fixed-size struct arrays before encoding. */
+export function expandCurveSugar(operation: string, params: Record<string, unknown>): Record<string, unknown> {
+  const desc = DT_CURVE_MODULES[operation]
+  if (desc === undefined || params.curves === undefined || typeof params.curves !== 'object' || params.curves === null) {
+    return params
+  }
+  const curvesInput = params.curves as Record<string, unknown>
+  const out: Record<string, unknown> = { ...params }
+  delete out.curves
+
+  const baseNodes = Array.isArray(out[desc.nodesField])
+    ? (structuredClone(out[desc.nodesField]) as Array<Array<Record<string, unknown>>>)
+    : Array.from({ length: desc.channels.length }, () => Array.from({ length: desc.maxNodes }, () => ({ x: 0, y: 0 })))
+  const counts = Array.isArray(out[desc.countField])
+    ? [...(out[desc.countField] as number[])]
+    : new Array<number>(desc.channels.length).fill(0)
+  const types = Array.isArray(out[desc.typeField])
+    ? [...(out[desc.typeField] as number[])]
+    : new Array<number>(desc.channels.length).fill(desc.defaultCurveType)
+
+  const setChannel = (chIdx: number, rawPts: unknown): void => {
+    if (!Array.isArray(rawPts) || rawPts.length < 2) {
+      throw new ChengyingError('invalid-argument', `${operation}.curves: each curve needs at least 2 [x, y] points`)
+    }
+    const pts = rawPts.slice(0, desc.maxNodes).map((pt, idx) => {
+      if (Array.isArray(pt) && pt.length >= 2) return { x: Math.max(0, Math.min(1, Number(pt[0]))), y: Math.max(0, Math.min(1, Number(pt[1]))) }
+      if (typeof pt === 'object' && pt !== null && 'x' in pt && 'y' in pt) {
+        const p = pt as { x: unknown; y: unknown }
+        return { x: Math.max(0, Math.min(1, Number(p.x))), y: Math.max(0, Math.min(1, Number(p.y))) }
+      }
+      throw new ChengyingError('invalid-argument', `${operation}.curves[${idx}]: expected [x, y]`)
+    }).sort((a, b) => a.x - b.x)
+    const row = baseNodes[chIdx] ?? Array.from({ length: desc.maxNodes }, () => ({ x: 0, y: 0 }))
+    for (let i = 0; i < desc.maxNodes; i++) {
+      const prev = (row[i] ?? {}) as Record<string, unknown>
+      row[i] = i < pts.length ? { ...prev, x: pts[i]!.x, y: pts[i]!.y } : { ...prev, x: 0, y: 0 }
+    }
+    baseNodes[chIdx] = row
+    counts[chIdx] = pts.length
+    if (!types[chIdx] || types[chIdx] === 0) types[chIdx] = desc.defaultCurveType
+  }
+
+  for (const [key, val] of Object.entries(curvesInput)) {
+    if (val === undefined) continue
+    const lower = key.toLowerCase()
+    const directIdx = desc.channels.findIndex(c => c.toLowerCase() === lower)
+    const aliasIdx = desc.aliases?.[lower]
+    const target = directIdx >= 0 ? directIdx : aliasIdx
+    if (target === undefined) {
+      throw new ChengyingError('invalid-argument', `${operation}.curves.${key}: unknown curve channel; valid: ${desc.channels.join(', ')}`)
+    }
+    if (target === -1) {
+      for (let c = 0; c < desc.channels.length; c++) setChannel(c, val)
+    } else {
+      setChannel(target, val)
+    }
+  }
+
+  // Ensure untouched sibling channels have valid 2-node identity curves instead of 0-node zeroed arrays.
+  for (let c = 0; c < desc.channels.length; c++) {
+    if ((counts[c] ?? 0) < 2) {
+      setChannel(c, [[0, desc.identityY[0]], [1, desc.identityY[1]]])
+    }
+  }
+
+  out[desc.nodesField] = baseNodes
+  out[desc.countField] = counts
+  out[desc.typeField] = types
+  return out
+}
+
 export function paramsSchema(m: DtModule): ParamSchema {
   if (m.params === undefined) return { type: 'object', properties: { blob: { type: 'string', description: 'raw params blob (hex); this module publishes no introspection' } }, additionalProperties: false }
-  return fieldSchema(m.params)
+  const s = fieldSchema(m.params)
+  const sugar = curveSugarSchema(m.operation)
+  if (sugar !== undefined && s.properties !== undefined) {
+    s.properties = { curves: sugar, ...s.properties }
+  }
+  return s
 }
 
 function writeNumber(buf: Buffer, f: DtField, at: number, v: number): void {
@@ -202,8 +371,9 @@ export function encodeParams(m: DtModule, params: Record<string, unknown>): Buff
     if (!/^[0-9a-f]*$/i.test(hex) || hex.length === 0) throw new ChengyingError('invalid-argument', `${m.operation} has no introspection; pass params.blob as hex`)
     return Buffer.from(hex, 'hex')
   }
+  const expanded = expandCurveSugar(m.operation, params)
   const buf = Buffer.alloc(m.paramsSize)
-  encodeField(buf, m.params, params, 0, m.operation)
+  encodeField(buf, m.params, expanded, 0, m.operation)
   return buf
 }
 

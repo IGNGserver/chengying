@@ -15,7 +15,7 @@
  */
 import type { Features } from '../types.ts'
 
-export const FEATURE_VERSION = 3
+export const FEATURE_VERSION = 4
 
 export interface RgbImage {
   width: number
@@ -307,15 +307,31 @@ export function computeFeatures(img: RgbImage): Features {
   const hist = new Float64Array(256)
   let clipHigh = 0
   let clipLow = 0
+  let singleChannelClipHigh = 0
+  let allChannelClipHigh = 0
+  let shadowDetailPixels = 0
+  let shadowTotalPixels = 0
   let lumSum = 0
   let lumSum2 = 0
   for (let i = 0, j = 0; i < n; i++, j += 3) {
     const l = gray[i] as number
     hist[Math.min(255, Math.round(l))]! += 1
     lumSum += l; lumSum2 += l * l
-    const mx = Math.max(data[j] as number, data[j + 1] as number, data[j + 2] as number)
-    if (mx >= 253) clipHigh++
+    const r = data[j] as number
+    const g = data[j + 1] as number
+    const b = data[j + 2] as number
+    const mx = Math.max(r, g, b)
+    const mn = Math.min(r, g, b)
+    if (mx >= 253) {
+      clipHigh++
+      if (mn >= 250) allChannelClipHigh++
+      else singleChannelClipHigh++
+    }
     if (l <= 3) clipLow++
+    if (l <= 38) {
+      shadowTotalPixels++
+      if (l > 3 && (mx - mn >= 3 || l >= 8)) shadowDetailPixels++
+    }
   }
   const mean = lumSum / n
   const std = Math.sqrt(Math.max(0, lumSum2 / n - mean * mean))
@@ -510,6 +526,129 @@ export function computeFeatures(img: RgbImage): Features {
   const topMean = top.reduce((a, b) => a + b, 0) / Math.max(1, top.length)
   const restMean = (allSal - topMean * top.length) / Math.max(1, sal.length - top.length)
 
+  // Subject & portrait face/eye region analysis on a 24x24 grid + pixel sub-window.
+  const sg = 24
+  const skinGrid = new Uint8Array(sg * sg)
+  let skinPixels = 0
+  let portraitSampled = 0
+  for (let gy = 0; gy < sg; gy++) {
+    const y0 = Math.floor(gy * h / sg); const y1 = Math.max(y0 + 1, Math.floor((gy + 1) * h / sg))
+    for (let gx = 0; gx < sg; gx++) {
+      const x0 = Math.floor(gx * w / sg); const x1 = Math.max(x0 + 1, Math.floor((gx + 1) * w / sg))
+      let cellSkin = 0; let cellCount = 0
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2) {
+          const j = (y * w + x) * 3
+          const r = data[j] as number; const g = data[j + 1] as number; const b = data[j + 2] as number
+          const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b
+          const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b
+          const mx = Math.max(r, g, b); const mn = Math.min(r, g, b)
+          const sat = mx === 0 ? 0 : (mx - mn) / mx
+          const isSkin = r > 60 && g > 40 && b > 25 && r > g && r > b && (r - g) >= 10 && cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173 && sat >= 0.14 && sat <= 0.72
+          if (isSkin) { cellSkin++; skinPixels++ }
+          cellCount++; portraitSampled++
+        }
+      }
+      if (cellCount > 0 && cellSkin / cellCount >= 0.42 && gy >= 1 && gy <= sg - 2) {
+        skinGrid[gy * sg + gx] = 1
+      }
+    }
+  }
+  const skinRatio = portraitSampled > 0 ? skinPixels / portraitSampled : 0
+  const visited = new Uint8Array(sg * sg)
+  const clusters: Array<{ minX: number; minY: number; maxX: number; maxY: number; cells: number }> = []
+  for (let gy = 0; gy < sg; gy++) {
+    for (let gx = 0; gx < sg; gx++) {
+      const idx = gy * sg + gx
+      if (!skinGrid[idx] || visited[idx]) continue
+      const q = [idx]
+      visited[idx] = 1
+      let minX = gx; let maxX = gx; let minY = gy; let maxY = gy; let cells = 0
+      while (q.length > 0) {
+        const cur = q.pop() as number
+        const cx0 = cur % sg; const cy0 = (cur - cx0) / sg
+        cells++
+        if (cx0 < minX) minX = cx0; if (cx0 > maxX) maxX = cx0
+        if (cy0 < minY) minY = cy0; if (cy0 > maxY) maxY = cy0
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const nx = cx0 + dx; const ny = cy0 + dy
+          if (nx < 0 || ny < 0 || nx >= sg || ny >= sg) continue
+          const ni = ny * sg + nx
+          if (skinGrid[ni] && !visited[ni]) { visited[ni] = 1; q.push(ni) }
+        }
+      }
+      const bw = maxX - minX + 1; const bh = maxY - minY + 1
+      const aspect = bw / Math.max(1, bh)
+      if (cells >= 3 && cells <= sg * sg * 0.45 && aspect >= 0.4 && aspect <= 2.2) {
+        clusters.push({ minX, minY, maxX, maxY, cells })
+      }
+    }
+  }
+  clusters.sort((a, b) => b.cells - a.cells)
+  const primaryFace = clusters[0]
+  const faceBox: [number, number, number, number] | undefined = primaryFace
+    ? [
+        Math.round((primaryFace.minX / sg) * 1000) / 1000,
+        Math.round((primaryFace.minY / sg) * 1000) / 1000,
+        Math.round(((primaryFace.maxX - primaryFace.minX + 1) / sg) * 1000) / 1000,
+        Math.round(((primaryFace.maxY - primaryFace.minY + 1) / sg) * 1000) / 1000,
+      ]
+    : undefined
+
+  // Measure sharpness inside the primary face box, or around the saliency centroid.
+  const sx0 = faceBox ? Math.floor(faceBox[0] * w) : Math.max(1, Math.floor((cx - 0.18) * w))
+  const sy0 = faceBox ? Math.floor(faceBox[1] * h) : Math.max(1, Math.floor((cy - 0.18) * h))
+  const sx1 = faceBox ? Math.min(w - 1, Math.ceil((faceBox[0] + faceBox[2]) * w)) : Math.min(w - 1, Math.ceil((cx + 0.18) * w))
+  const sy1 = faceBox ? Math.min(h - 1, Math.ceil((faceBox[1] + faceBox[3]) * h)) : Math.min(h - 1, Math.ceil((cy + 0.18) * h))
+  const subjectSharpness = laplacianVariance(norm, w, h, sx0, sy0, sx1, sy1)
+  const subjectSharpnessRatio = peak > 1 ? subjectSharpness / peak : 1
+
+  // Eye-band contrast inside a detected face box (30%..48% height, below eyebrows).
+  let eyeLineContrast = 0.5
+  let eyesClosedSuspected = false
+  if (faceBox !== undefined && faceBox[2] >= 0.08 && faceBox[3] >= 0.08) {
+    const ex0 = Math.max(4, Math.floor((faceBox[0] + faceBox[2] * 0.15) * w))
+    const ex1 = Math.min(w - 5, Math.ceil((faceBox[0] + faceBox[2] * 0.85) * w))
+    const ey0 = Math.max(2, Math.floor((faceBox[1] + faceBox[3] * 0.30) * h))
+    const ey1 = Math.min(h - 3, Math.ceil((faceBox[1] + faceBox[3] * 0.48) * h))
+    const by0 = Math.max(2, Math.floor((faceBox[1] + faceBox[3] * 0.50) * h))
+    const by1 = Math.min(h - 3, Math.ceil((faceBox[1] + faceBox[3] * 0.85) * h))
+    let eyeHorizGrad = 0; let irisPixels = 0; let eyeCount = 0
+    let cheekLuma = 0; let cheekCount = 0
+    for (let y = by0; y < by1; y++) {
+      for (let x = ex0; x < ex1; x++) {
+        cheekLuma += norm[y * w + x] as number
+        cheekCount++
+      }
+    }
+    const meanCheek = cheekCount > 0 ? cheekLuma / cheekCount : 128
+    const spanX = Math.max(2, Math.round((ex1 - ex0) * 0.04))
+    const midL = Math.floor((faceBox[0] + faceBox[2] * 0.44) * w)
+    const midR = Math.ceil((faceBox[0] + faceBox[2] * 0.56) * w)
+    for (let y = ey0; y < ey1; y++) {
+      for (let x = ex0; x < ex1; x++) {
+        if (x >= midL && x <= midR) continue // skip nose bridge
+        const i = y * w + x
+        const v = norm[i] as number
+        const gx = Math.abs((norm[i + 1] as number) - (norm[i - 1] as number))
+        const leftV = norm[y * w + Math.max(0, x - spanX)] as number
+        const rightV = norm[y * w + Math.min(w - 1, x + spanX)] as number
+        eyeHorizGrad += gx
+        // Open eye pupil/iris: dark core (<35% of cheek luma) flanked on BOTH sides by brighter sclera/eyelid
+        if (v < meanCheek * 0.35 && leftV > v + 45 && rightV > v + 45) irisPixels++
+        eyeCount++
+      }
+    }
+    if (eyeCount > 16) {
+      const meanGx = eyeHorizGrad / eyeCount
+      const irisFrac = irisPixels / eyeCount
+      eyeLineContrast = Math.min(1, (meanGx / 18) * 0.4 + Math.min(1, irisFrac / 0.02) * 0.6)
+      if (subjectSharpness >= 40 && irisFrac < 0.002 && eyeLineContrast < 0.25) {
+        eyesClosedSuspected = true
+      }
+    }
+  }
+
   return {
     version: FEATURE_VERSION,
     width: w,
@@ -526,6 +665,9 @@ export function computeFeatures(img: RgbImage): Features {
       p99: p99 / 255,
       clipHigh: clipHigh / n,
       clipLow: clipLow / n,
+      singleChannelClipHigh: singleChannelClipHigh / n,
+      allChannelClipHigh: allChannelClipHigh / n,
+      shadowHeadroom: shadowTotalPixels > 0 ? shadowDetailPixels / shadowTotalPixels : 1,
       entropy,
       dynamicRange: (p99 - p01) / 255,
     },
@@ -548,6 +690,15 @@ export function computeFeatures(img: RgbImage): Features {
       symmetry: Math.max(0, Math.min(1, symmetry)),
       borderClutter: borderN > 0 && allSal > 0 ? (border / borderN) / (allSal / sal.length) : 1,
       subjectContrast: restMean > 0 ? topMean / restMean : 1,
+    },
+    subject: {
+      skinRatio: Math.round(skinRatio * 10000) / 10000,
+      faceRegions: clusters.length,
+      ...(faceBox ? { faceBox } : {}),
+      subjectSharpness: Math.round(subjectSharpness * 10) / 10,
+      subjectSharpnessRatio: Math.round(subjectSharpnessRatio * 1000) / 1000,
+      eyeLineContrast: Math.round(eyeLineContrast * 1000) / 1000,
+      eyesClosedSuspected,
     },
   }
 }

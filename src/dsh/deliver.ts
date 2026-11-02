@@ -21,6 +21,8 @@ export interface DeliveryRequest {
   subdir?: string
   naming?: 'original' | 'datetime'
   source?: OriginalSource
+  includeRaw?: boolean
+  c2pa?: boolean
   overwrite?: boolean
   background?: boolean
 }
@@ -68,7 +70,7 @@ export async function runDelivery(rt: ChengyingRuntime, project: Project, exec: 
       const exported = await exportPhotos(project, rt.edit(project), {
         shotIds: opts.shots, taskIds: opts.tasks, selectionId: selection, dir,
         format: opts.format, quality: opts.quality, maxEdge: opts.maxEdge, subdir: opts.subdir,
-        naming: opts.naming, overwrite: opts.overwrite, signal,
+        naming: opts.naming, includeRaw: opts.includeRaw, c2pa: opts.c2pa, overwrite: opts.overwrite, signal,
         onProgress: (done, total, current) => progress('export', done, total, current),
         authorize: rt.authorizer(project),
       })

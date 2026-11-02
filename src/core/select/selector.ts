@@ -136,6 +136,8 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
     if (preferHits.length > 0) { fused += Math.min(16, 8 * preferHits.length); reasonBits.push(`matches ${preferHits.slice(0, 3).join('/')}`) }
     if (avoidHits.length > 0) { fused -= 20; reasonBits.push(`avoid ${avoidHits.slice(0, 2).join('/')}`) }
     if (shot.userRating !== null && shot.userRating > 0) fused += (shot.userRating - 3) * 4
+    if (dims.issues.includes('eyes-closed')) { fused -= 18; reasonBits.push('eyes-closed') }
+    if (dims.issues.includes('subject-out-of-focus')) { fused -= 12; reasonBits.push('subject-soft') }
     if (dims.issues.includes('out-of-focus') || dims.issues.includes('motion-blur')) reasonBits.push('soft')
     cands.set(shot.id, { shot, dims, fused: clamp(fused, 0, 100), scene: sceneOf.get(shot.id), segment: segmentOf.get(shot.id), reasonBits })
   }

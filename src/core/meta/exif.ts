@@ -109,6 +109,8 @@ export function normalizeMetadata(tags: RawTags): PhotoMetadata {
     focalLength: num(tags.FocalLength),
     width: num(tags.ImageWidth) ?? num(tags.ExifImageWidth),
     height: num(tags.ImageHeight) ?? num(tags.ExifImageHeight),
+    bitsPerSample: num(tags.BitsPerSample),
+    exposureBias: num(tags.ExposureCompensation) ?? num(tags.ExposureBiasValue),
     orientation: num(tags.Orientation),
     rating: num(tags.Rating),
     mimeType: str(tags.MIMEType),
@@ -196,16 +198,23 @@ export class MetadataService {
    * are already upright) and stamp processing provenance. The ICC profile of
    * the export is kept because it describes the rendered pixels.
    */
-  async copyForExport(source: string, exported: string, provenance: { software: string; recipe?: string; generative?: boolean; history?: string }, signal?: AbortSignal): Promise<void> {
-    const args = [
-      '-overwrite_original',
-      '-m',
-      '-TagsFromFile', source,
+  async copyForExport(source: string | string[], exported: string, provenance: { software: string; recipe?: string; generative?: boolean; history?: string }, signal?: AbortSignal): Promise<void> {
+    const sources = Array.isArray(source) ? source : [source]
+    const primary = sources[0]
+    if (primary === undefined) throw new ChengyingError('invalid-argument', 'copyForExport requires at least one source path')
+    // Lay down secondary companion sources (e.g. camera JPEG paired with RAW) first so any tags missing in primary are filled, then overwrite with primary.
+    const fromFiles = [...sources].reverse().flatMap(src => [
+      '-TagsFromFile', src,
       '-all:all', '-unsafe',
       '--ICC_Profile:all',
       '--PreviewImage', '--ThumbnailImage', '--JpgFromRaw', '--OtherImage', '--PreviewTIFF', '--ThumbnailTIFF',
       '--StripOffsets', '--StripByteCounts', '--ImageWidth', '--ImageHeight', '--BitsPerSample', '--Compression', '--PhotometricInterpretation',
       '--ExifImageWidth', '--ExifImageHeight',
+    ])
+    const args = [
+      '-overwrite_original',
+      '-m',
+      ...fromFiles,
       // Second pass in the same command: our own provenance tags.
       '-Orientation#=1',
       `-XMP-xmp:CreatorTool=${provenance.software}`,
@@ -224,8 +233,20 @@ export class MetadataService {
   }
 
   /** Compare provenance tags of the source and an exported file. */
-  async verify(source: string, exported: string, sourceTags?: RawTags): Promise<VerifyReport> {
-    const src = sourceTags ?? await this.readRawTags(source)
+  async verify(source: string | string[], exported: string, sourceTags?: RawTags): Promise<VerifyReport> {
+    let src: RawTags
+    if (sourceTags !== undefined) {
+      src = sourceTags
+    } else if (Array.isArray(source)) {
+      const merged: RawTags = {}
+      for (const s of [...source].reverse()) {
+        const tags = await this.readRawTags(s)
+        for (const [k, v] of Object.entries(tags)) if (v !== undefined && v !== null && v !== '') merged[k] = v
+      }
+      src = merged
+    } else {
+      src = await this.readRawTags(source)
+    }
     const dst = await this.readRawTags(exported)
     const details: VerifyReport['details'] = {}
     const missing: string[] = []

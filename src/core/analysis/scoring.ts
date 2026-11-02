@@ -15,7 +15,26 @@ export interface ShotContext {
   iso?: number | null
   exposureTime?: number | null
   focalLength?: number | null
+  bitsPerSample?: number | null
+  exposureBias?: number | null
   hour?: number | null
+}
+
+export function inferHeuristicTags(f: Features, ctx: ShotContext): string[] {
+  const tags = new Set<string>()
+  if (f.subject !== undefined && f.subject.faceRegions >= 1 && f.subject.skinRatio >= 0.025) {
+    tags.add('people')
+  }
+  if (ctx.hour !== null && ctx.hour !== undefined && ((ctx.hour >= 5.5 && ctx.hour <= 8) || (ctx.hour >= 16.5 && ctx.hour <= 19.5)) && f.color.warmth > 8) {
+    tags.add('sunset')
+  }
+  if ((ctx.hour !== null && ctx.hour !== undefined && (ctx.hour >= 20 || ctx.hour <= 4.5)) || (f.exposure.mean < 0.25 && (ctx.iso ?? 0) >= 1600)) {
+    tags.add('night')
+  }
+  if ((f.subject === undefined || f.subject.faceRegions === 0) && f.width >= f.height && (ctx.focalLength == null || ctx.focalLength <= 35) && f.composition.tiltConfidence > 0.2) {
+    tags.add('landscape')
+  }
+  return [...tags]
 }
 
 export function technicalScore(f: Features, ctx: ShotContext): ScoreSet {
@@ -27,6 +46,17 @@ export function technicalScore(f: Features, ctx: ShotContext): ScoreSet {
   const motionBlur = f.sharpness.anisotropy > 0.55 && peakSharp < 0.55
   if (motionBlur) { sharp *= 0.75; issues.push('motion-blur') }
   if (peakSharp < 0.3) issues.push('out-of-focus')
+
+  // Portrait / salient subject focus & blink detection.
+  const sub = f.subject
+  const hasPortrait = sub !== undefined && sub.faceRegions >= 1 && sub.skinRatio >= 0.02
+  if (sub !== undefined && hasPortrait && peakSharp >= 0.45 && sub.subjectSharpnessRatio < 0.25) {
+    sharp *= 0.68
+    issues.push('subject-out-of-focus')
+  }
+  if (sub?.eyesClosedSuspected === true) {
+    issues.push('eyes-closed')
+  }
 
   const e = f.exposure
   let exposure = 1
@@ -47,12 +77,17 @@ export function technicalScore(f: Features, ctx: ShotContext): ScoreSet {
   const castScore = 1 - lin(cast, 6, 20)
   if (castScore < 0.6) issues.push('color-cast')
 
-  const technical = 100 * (0.45 * sharp + 0.25 * exposure + 0.13 * noise + 0.1 * contrast + 0.07 * castScore)
+  let technical = 100 * (0.45 * sharp + 0.25 * exposure + 0.13 * noise + 0.1 * contrast + 0.07 * castScore)
+  if (sub?.eyesClosedSuspected === true) technical = Math.max(0, technical - 18)
   return {
     technical: round(technical, 1),
     issues,
+    tags: inferHeuristicTags(f, ctx),
     detail: {
       sharpness: round(sharp * 100, 1),
+      subjectSharpness: sub ? round(lin(Math.log10(sub.subjectSharpness + 1), 1.4, 2.8) * 100, 1) : undefined,
+      faceRegions: sub?.faceRegions ?? 0,
+      eyesClosedSuspected: sub?.eyesClosedSuspected ?? false,
       exposure: round(exposure * 100, 1),
       noise: round(noise * 100, 1),
       contrast: round(contrast * 100, 1),
@@ -60,7 +95,7 @@ export function technicalScore(f: Features, ctx: ShotContext): ScoreSet {
       motionBlur,
     },
     reasons: {
-      technical: `sharp ${round(sharp * 100)}, exposure ${round(exposure * 100)}, noise ${round(noise * 100)}, contrast ${round(contrast * 100)}`,
+      technical: `sharp ${round(sharp * 100)}, exposure ${round(exposure * 100)}, noise ${round(noise * 100)}, contrast ${round(contrast * 100)}${sub?.eyesClosedSuspected ? ', eyes-closed suspected' : ''}`,
     },
   }
 }
@@ -84,6 +119,7 @@ export function aestheticScore(f: Features, ctx: ShotContext): ScoreSet {
   return {
     aesthetic: round(aesthetic, 1),
     composition: round(composition * 100, 1),
+    tags: inferHeuristicTags(f, ctx),
     detail: {
       placement: round(placement * 100, 1),
       thirds: round(c.thirds * 100, 1),
@@ -104,20 +140,78 @@ export function aestheticScore(f: Features, ctx: ShotContext): ScoreSet {
   }
 }
 
-/** How much a skilled edit can still lift the frame (recoverable faults, RAW headroom). */
+/**
+ * Estimate how much a professional edit can lift the frame, grounded in actual
+ * sensor/RAW headroom (ISO read-noise floor, bit depth, single-channel vs
+ * all-channel highlight clipping, and shadow texture retention) rather than
+ * guessing blindly from whether a RAW file exists.
+ */
 export function potentialScore(f: Features, tech: ScoreSet, ctx: ShotContext): ScoreSet {
   const issues = new Set(tech.issues ?? [])
-  let potential = 0.45
-  if (ctx.isRaw) potential += 0.25
-  const fixable = ['underexposed', 'overexposed', 'color-cast', 'tilted-horizon', 'flat', 'shadow-clipping']
-  for (const i of fixable) if (issues.has(i)) potential += ctx.isRaw ? 0.06 : 0.03
-  if (issues.has('out-of-focus') || issues.has('motion-blur')) potential -= 0.35
-  if (issues.has('highlight-clipping') && !ctx.isRaw) potential -= 0.15
-  if (issues.has('noisy')) potential -= ctx.isRaw ? 0.03 : 0.1
-  potential += 0.1 * lin(f.exposure.entropy, 6, 7.6)
+  const e = f.exposure
+  const iso = ctx.iso ?? 200
+  const bits = ctx.bitsPerSample ?? (ctx.isRaw ? 14 : 8)
+  const isoFactor = clamp(1 - Math.max(0, Math.log2(Math.max(100, iso) / 100)) / 6.5, 0.15, 1)
+  const bitFactor = ctx.isRaw ? clamp((bits - 8) / 6, 0.5, 1) : 0.2
+  const shadowHeadroom = e.shadowHeadroom ?? (1 - clamp(e.clipLow * 4, 0, 1))
+  const singleClip = e.singleChannelClipHigh ?? (e.clipHigh * 0.5)
+  const allClip = e.allChannelClipHigh ?? (e.clipHigh * 0.5)
+
+  // Estimated recoverable dynamic range in EV.
+  const shadowEv = round((ctx.isRaw ? 2.8 : 0.7) * isoFactor * bitFactor * (0.4 + 0.6 * shadowHeadroom), 2)
+  const highlightEv = round(
+    ctx.isRaw
+      ? Math.max(0, (1.4 - clamp(allClip * 8, 0, 1.4)) * (0.65 + 0.35 * clamp(singleClip * 10, 0, 1)))
+      : Math.max(0, 0.25 - clamp(allClip * 4, 0, 0.25)),
+    2,
+  )
+  const headroomEv = round(shadowEv + highlightEv, 2)
+  const allChannelBlowout = allClip > 0.18
+  const highlightRecoverable = e.clipHigh > 0.01 && !allChannelBlowout && (ctx.isRaw || singleClip > allClip)
+  const shadowRecoverable = (issues.has('underexposed') || issues.has('shadow-clipping')) && shadowHeadroom >= 0.35 && iso <= 3200
+
+  let potential = 0.42 + Math.min(0.28, headroomEv / 12)
+  const fixable: string[] = []
+  if (issues.has('underexposed') || issues.has('shadow-clipping')) {
+    if (shadowRecoverable) {
+      potential += ctx.isRaw ? 0.12 * isoFactor : 0.04
+      fixable.push('shadows')
+    } else {
+      potential -= 0.08
+    }
+  }
+  if (issues.has('overexposed') || issues.has('highlight-clipping')) {
+    if (allChannelBlowout) {
+      potential -= ctx.isRaw ? 0.18 : 0.25
+    } else if (highlightRecoverable) {
+      potential += ctx.isRaw ? 0.1 : 0.03
+      fixable.push('highlights')
+    }
+  }
+  for (const k of ['color-cast', 'tilted-horizon', 'flat'] as const) {
+    if (issues.has(k)) {
+      potential += ctx.isRaw ? 0.05 : 0.035
+      fixable.push(k)
+    }
+  }
+  if (issues.has('out-of-focus') || issues.has('motion-blur') || issues.has('subject-out-of-focus')) potential -= 0.35
+  if (issues.has('eyes-closed')) potential -= 0.25
+  if (issues.has('noisy')) potential -= ctx.isRaw ? 0.04 : 0.12
+  potential += 0.08 * lin(e.entropy, 6, 7.6)
+
   return {
     potential: round(clamp(potential, 0, 1) * 100, 1),
-    reasons: { potential: `${ctx.isRaw ? 'RAW headroom' : 'raster only'}; fixable: ${fixable.filter(i => issues.has(i)).join(', ') || 'none'}` },
+    detail: {
+      headroomEv,
+      shadowEv,
+      highlightEv,
+      highlightRecoverable,
+      shadowRecoverable,
+      allChannelBlowout,
+    },
+    reasons: {
+      potential: `${ctx.isRaw ? `RAW ~${headroomEv}EV headroom (ISO${iso})` : 'raster only'}; recoverable: ${fixable.join(', ') || 'none'}${allChannelBlowout ? '; unrecoverable highlight blowout' : ''}`,
+    },
   }
 }
 

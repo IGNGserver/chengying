@@ -482,7 +482,7 @@ export class ChengyingRuntime {
     let done = 0
     for (const batch of batches) {
       opts.signal?.throwIfAborted()
-      const items: VlmItem[] = batch.map((s, i) => ({ label: `#${i + 1}`, shotId: s.id, context: this.shotContext(project, s) }))
+      const items: VlmItem[] = batch.map((s, i) => ({ label: `#${i + 1}`, shotId: s.id, context: this.shotContext(project, s, { forCloud: true }) }))
       try {
         const sheet = await project.sheet(batch.map(s => s.id), { labels: items.map(i => i.label), cell: this.config.vlm.cell, columns: Math.ceil(Math.sqrt(batch.length)) })
         const data = await sharp(sheet.path).jpeg({ quality: 85 }).toBuffer()
@@ -526,15 +526,23 @@ export class ChengyingRuntime {
     return { scored, failed, batches: batches.length, model: `${provider}/${model}`, usage: { inputTokens, outputTokens }, errors: errors.slice(0, 10) }
   }
 
-  shotContext(project: Project, s: Shot): string {
+  shotContext(project: Project, s: Shot, opts: { forCloud?: boolean } = {}): string {
     const dims = mergeDims(project.repo.scores(s.id))
+    const hideGps = opts.forCloud === true && (this.config.privacy?.stripGpsForCloud ?? true)
+    const locGroup = project.repo.groupOf(s.id, 'location')
+    const gpsBit = s.gps === null
+      ? undefined
+      : hideGps
+        ? (locGroup ? `loc:${locGroup}` : 'gps:redacted')
+        : `gps ${s.gps.lat.toFixed(3)},${s.gps.lon.toFixed(3)}`
     const bits = [
       s.captureTime?.replace('T', ' ').slice(0, 16) ?? 'undated',
-      s.gps !== null ? `gps ${s.gps.lat.toFixed(3)},${s.gps.lon.toFixed(3)}` : undefined,
+      gpsBit,
       s.camera ?? undefined,
       s.focalLength !== null ? `${round(s.focalLength, 0)}mm` : undefined,
       s.iso !== null ? `ISO${s.iso}` : undefined,
       s.rawFile !== null ? 'RAW' : 'JPEG',
+      project.repo.groupOf(s.id, 'near') ? `[burst ${project.repo.groupOf(s.id, 'near')}]` : undefined,
       dims.technical !== undefined ? `tech ${round(dims.technical, 0)}` : undefined,
       dims.issues.length > 0 ? `issues: ${dims.issues.slice(0, 4).join(',')}` : undefined,
     ]

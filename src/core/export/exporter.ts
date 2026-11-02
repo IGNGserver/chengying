@@ -8,7 +8,7 @@
  * full edit document + each engine's native sidecar) is written beside the
  * exports in _recipes/.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, utimesSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { Project } from '../project.ts'
 import type { EditService } from '../edit/service.ts'
@@ -16,6 +16,7 @@ import type { EditDocument, Shot } from '../types.ts'
 import type { VerifyReport } from '../meta/exif.ts'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
 import { newId, nowIso } from '../util/misc.ts'
+import { run } from '../util/proc.ts'
 
 declare const __CHENGYING_VERSION__: string
 const VERSION = typeof __CHENGYING_VERSION__ === 'string' ? __CHENGYING_VERSION__ : 'dev'
@@ -33,6 +34,10 @@ export interface ExportOptions {
   dir?: string
   /** File naming: original base name (default) or capture time. */
   naming?: 'original' | 'datetime'
+  /** Also copy the paired RAW original alongside the rendered export. */
+  includeRaw?: boolean
+  /** Generate a C2PA content-credentials manifest (and sign with c2patool when available). */
+  c2pa?: boolean
   overwrite?: boolean
   signal?: AbortSignal
   onProgress?: (done: number, total: number, current?: string) => void
@@ -44,6 +49,9 @@ export interface ExportItem {
   taskId: string | null
   revisionId: string | null
   path?: string
+  rawCopyPath?: string
+  c2paManifest?: string
+  c2paSigned?: boolean
   recipe?: string
   verified: boolean
   verify?: VerifyReport
@@ -109,14 +117,29 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
     try {
       project.guard.writable(target)
       const out = await edit.renderDoc(shot, doc, { output: target, format, quality: opts.quality ?? 95, maxEdge: opts.maxEdge, bitDepth: opts.bitDepth, signal: opts.signal, authorize: opts.authorize })
-      // metadata: copy from every original of the shot (RAW first, then camera JPEG fills gaps)
-      const sources = [shot.rawFile, shot.rasterFile].filter((x): x is string => x !== null).map(id => project.repo.file(id)).filter(f => f !== undefined)
-      const primary = sources.find(f => f?.id === doc.sourceFile) ?? sources[0]
+      // metadata: copy from every original of the shot (primary first, paired RAW/JPEG fills gaps)
+      const sources = [shot.rawFile, shot.rasterFile].filter((x): x is string => x !== null).map(id => project.repo.file(id)).filter((f): f is NonNullable<typeof f> => f !== undefined)
+      const primary = sources.find(f => f.id === doc.sourceFile) ?? sources[0]
       if (primary === undefined) throw new ChengyingError('not-found', 'no source file for metadata')
+      const orderedSourcePaths = [primary, ...sources.filter(f => f.id !== primary.id)].map(f => project.guard.readable(f.path))
       const recipeName = `${basename(target)}.chengying.json`
       const history = doc.stages.map(s => `${s.engine}: ${s.steps.filter(x => x.enabled).map(x => x.op).join(', ') || 'default'}`).join(' | ')
-      await project.metadata.copyForExport(project.guard.readable(primary.path), out.path, { software: `Chengying ${VERSION}`, recipe: `_recipes/${recipeName}`, generative, history }, opts.signal)
-      const verify = await project.metadata.verify(project.guard.readable(primary.path), out.path)
+      await project.metadata.copyForExport(orderedSourcePaths, out.path, { software: `Chengying ${VERSION}`, recipe: `_recipes/${recipeName}`, generative, history }, opts.signal)
+      const verify = await project.metadata.verify(orderedSourcePaths, out.path)
+
+      // Optional companion RAW copy in the delivery folder.
+      let rawCopyPath: string | undefined
+      if (opts.includeRaw === true && shot.rawFile !== null) {
+        const rawRec = project.repo.file(shot.rawFile)
+        if (rawRec !== undefined) {
+          const rawSrc = project.guard.readable(rawRec.path)
+          const rawDest = project.guard.writable(join(dir, `${base}.${rawRec.ext}`))
+          copyFileSync(rawSrc, rawDest)
+          const st = statSync(rawSrc)
+          utimesSync(rawDest, st.atime, st.mtime)
+          rawCopyPath = rawDest
+        }
+      }
       // native recipes for recoverability
       const natives: Record<string, string> = {}
       for (const [i, stage] of doc.stages.entries()) {
@@ -130,15 +153,60 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
           natives[`stage${i}`] = `unavailable: ${errorMessage(error)}`
         }
       }
+      // C2PA content-credentials manifest (written for generative edits or when opts.c2pa is requested; signed via c2patool when available).
+      let c2paManifestPath: string | undefined
+      let c2paSigned: boolean | undefined
+      if (opts.c2pa === true || generative) {
+        const c2paObj = {
+          alg: 'ps256',
+          claim_generator: `Chengying/${VERSION}`,
+          title: basename(out.path),
+          assertions: [
+            {
+              label: 'c2pa.actions',
+              data: {
+                actions: [
+                  {
+                    action: generative ? 'c2pa.edited' : 'c2pa.color_adjustments',
+                    softwareAgent: `Chengying ${VERSION}`,
+                    digitalSourceType: generative
+                      ? 'http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia'
+                      : 'http://cv.iptc.org/newscodes/digitalsourcetype/digitalCapture',
+                    parameters: { history },
+                  },
+                ],
+              },
+            },
+          ],
+        }
+        c2paManifestPath = project.guard.writable(join(recipeDir, `${basename(target)}.c2pa.json`))
+        writeFileSync(c2paManifestPath, JSON.stringify(c2paObj, null, 2))
+        if (opts.c2pa === true) {
+          c2paSigned = false
+          const c2paBin = process.env.CHENGYING_C2PATOOL ?? 'c2patool'
+          try {
+            const signedTmp = project.guard.writable(`${out.path}.c2pa.${ext}`)
+            const r = await run(c2paBin, [out.path, '-m', c2paManifestPath, '-o', signedTmp, '-f'], { timeoutMs: 60_000, signal: opts.signal })
+            if (r.code === 0 && existsSync(signedTmp)) {
+              copyFileSync(signedTmp, out.path)
+              c2paSigned = true
+            }
+          } catch {
+            c2paSigned = false
+          }
+        }
+      }
+
       const recipePath = project.guard.writable(join(recipeDir, recipeName))
       writeFileSync(recipePath, JSON.stringify({
         format: 'chengying-recipe/1', exportedAt: nowIso(), chengying: VERSION, shot: { id: shot.id, captureTime: shot.captureTime, files: sources.map(f => f?.relPath) },
-        source: source?.relPath, taskId: task?.id ?? null, revisionId, document: doc, nativeRecipes: natives, verification: verify,
+        source: source?.relPath, rawCopy: rawCopyPath ? basename(rawCopyPath) : undefined, c2paManifest: c2paManifestPath ? basename(c2paManifestPath) : undefined, c2paSigned,
+        taskId: task?.id ?? null, revisionId, document: doc, nativeRecipes: natives, verification: verify,
         engines: Object.fromEntries(await Promise.all(doc.stages.map(async s => [s.engine, (await edit.engines.get(s.engine).probe()).version ?? '?']))),
       }, null, 2))
       project.repo.addExport({ taskId: task?.id ?? null, shotId, revisionId, path: out.path, format, verified: verify.ok, verify, recipePath })
       if (task !== undefined) project.repo.addEvent(task.id, verify.ok ? 'info' : 'warn', 'export', `exported ${basename(out.path)} (metadata ${verify.ok ? 'verified' : `MISMATCH: ${[...verify.missing, ...verify.mismatched.map(m => m.tag)].join(', ')}`})`, { path: out.path })
-      items.push({ shotId, taskId: task?.id ?? null, revisionId, path: out.path, recipe: recipePath, verified: verify.ok, verify, generative })
+      items.push({ shotId, taskId: task?.id ?? null, revisionId, path: out.path, ...(rawCopyPath ? { rawCopyPath } : {}), ...(c2paManifestPath ? { c2paManifest: c2paManifestPath } : {}), ...(c2paSigned !== undefined ? { c2paSigned } : {}), recipe: recipePath, verified: verify.ok, verify, generative })
     } catch (error) {
       items.push({ shotId, taskId: task?.id ?? null, revisionId, verified: false, error: errorMessage(error), generative })
     }

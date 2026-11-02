@@ -22,7 +22,7 @@ The attached image is a contact sheet; each frame is labeled (${items.map(i => i
 ${options.purpose ? `Selection goal: ${options.purpose}\n` : ''}Frame context (from metadata and classical analysis):
 ${lines}
 
-Score EVERY labeled frame independently on a 0-100 scale:
+Score EVERY labeled frame on a 0-100 scale (when frames share a [burst near_xxxx] tag in their context, compare them directly and score the frame with better facial expression, open eyes, and sharper subject higher):
 - technical: focus on the subject, motion blur, exposure, noise as visible at this size
 - aesthetic: light, color, mood, overall visual impact
 - composition: framing, subject placement, horizon, clutter, cropping potential
