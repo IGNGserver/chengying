@@ -47,7 +47,7 @@ export default {
           id: 'workspace',
           order: 40,
           title: () => (zh() ? '澄影 · 照片筛选与修图' : 'Chengying · cull & retouch'),
-          description: () => (zh() ? '评分、选片、修图任务、前后对比与导出' : 'Scores, selections, retouch tasks, before/after, exports'),
+          description: () => (zh() ? '新建任务选择澄影预设后，查看计划、选片、修图任务、交付与授权' : 'Pick the Chengying preset for a new task, then inspect the plan, selections, retouch tasks, delivery and authorizations'),
           icon: Icon,
         }],
       }), 'chengying: sidebar tab type')

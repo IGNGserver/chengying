@@ -23,6 +23,7 @@ export const STYLES = `
 .cy-small{font-size:12px}
 .cy-row{display:flex;align-items:center;gap:6px;min-width:0}
 .cy-path{font-size:12px;color:var(--dsw-alias-label-tertiary);word-break:break-all;margin-bottom:6px}
+.cy-plan{margin:0 0 10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-secondary);border-radius:8px;background:var(--dsw-alias-bg-secondary);display:grid;gap:3px}
 .cy-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:6px}
 .cy-stat{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:6px 8px}
 .cy-stat-v{font-size:17px;font-weight:600}

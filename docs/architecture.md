@@ -1,31 +1,60 @@
 # 澄影架构
 
 ```
-DSH host ──► src/dsh (plugin entry)
-              ├─ tools/cull.ts     photo_* (phase 1)
-              ├─ tools/edit.ts     edit_* / export_run (phase 2)
-              ├─ tools/ai.ts       edit_generate / edit_unify_style / gen_* (phase 3)
-              ├─ orchestrator.ts   editing sub-agents (ctx.subagents), concurrency, usage
-              ├─ runtime.ts        projects, activities/jobs, VLM pass, authorization
-              ├─ http.ts           panel API (behind ctx.connection auth)
-              └─ ../client         sidebar panel (React via the host ModuleLoader)
-                     │
-                     ▼
-            src/core (host-independent; also used by the CLI and tests)
-              ├─ project.ts        one workspace = one SQLite DB (node:sqlite) under stateRoot
-              ├─ fsguard.ts        read: workspace + own dirs; write: own dirs only; originals never writable
-              ├─ scan/ meta/       discovery, RAW+JPEG pairing, ExifTool metadata
-              ├─ image/ analysis/  previews, pixel features (worker pool), scoring, VLM, models
-              ├─ grouping/ select/ duplicates, scenes, trip segments, MMR + narrative selection, preferences
-              ├─ edit/
-              │   ├─ engine.ts     EngineAdapter contract, Catalog, cache keyed by engine fingerprint
-              │   ├─ registry.ts   darktable · rawtherapee · builtin · ai
-              │   ├─ service.ts    tasks, immutable revisions, multi-stage render, compare, generate
-              │   ├─ verify.ts     interface-coverage verification
-              │   ├─ generative.ts providers (openai-images, comfyui, command)
-              │   └─ engines/      adapters
-              └─ export/           full-res render + metadata copy + read-back verification + recipes
+DSH host (bundle chengying-host, mode: auto)
+  ├─ runtime.ts        projects, activities/jobs, VLM pass, authorization, session plans
+  ├─ http.ts           panel API (behind ctx.connection auth)
+  └─ ../client         sidebar panel (React via the host ModuleLoader)
+        ▲
+        │ one shared ChengyingRuntime service
+        │
+DSH agent preset "chengying" (presets/chengying.patch.yml)
+  ├─ tools/session.ts   photo_session_start / photo_workspace_import / photo_deliver
+  ├─ tools/cull.ts      photo_* (phase 1)
+  ├─ tools/edit.ts      edit_* / export_run (phase 2)
+  ├─ tools/ai.ts        edit_generate / photo_ai_redraw / gen_* (phase 3)
+  ├─ orchestrator.ts    editing sub-agents (ctx.subagents), concurrency, usage
+  └─ system prompt      plan → cull → select → retouch/redraw → deliver
+        │
+        ▼
+src/core (host-independent; also used by the CLI and tests)
+  ├─ project.ts        one workspace = one SQLite DB (node:sqlite) under stateRoot
+  ├─ fsguard.ts        read: workspace + own dirs; write: own dirs only; originals never writable
+  ├─ scan/ meta/       discovery, RAW+JPEG pairing, ExifTool metadata
+  ├─ image/ analysis/  previews, pixel features (worker pool), scoring, VLM, models
+  ├─ grouping/ select/ duplicates, scenes, trip segments, MMR + narrative selection, preferences
+  ├─ edit/
+  │   ├─ engine.ts     EngineAdapter contract, Catalog, cache keyed by engine fingerprint
+  │   ├─ registry.ts   darktable · rawtherapee · builtin · ai
+  │   ├─ service.ts    tasks, immutable revisions, multi-stage render, compare, generate
+  │   ├─ verify.ts     interface-coverage verification
+  │   ├─ generative.ts providers (openai-images, comfyui, command)
+  │   └─ engines/      adapters
+  └─ export/
+      ├─ exporter.ts   full-res render + metadata copy + read-back verification + recipes
+      └─ deliver.ts    original-copy delivery + manifest
 ```
+
+## 预设与 Host/Agent 分层
+
+DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会话的 persona、工具、提示词与 skill。澄影不再把 30+ 摄影工具注册到 Host 层；Host 行只保留 runtime、HTTP 面板和共享服务，`presets/chengying.patch.yml` 在选中预设时挂载 Agent 行。Headless/直接 `--patch` 没有 preset roster，`mode: auto` 自动退化为单行 `both`。
+
+## 会话计划
+
+`photo_session_start` 把来源、范围、修图方式、筛图质量、交付目录和 checkpoint 写入项目 DB 的 `sessionPlan:<sessionId>`（`src/dsh/plan.ts`）。后续工具执行计划守卫：
+
+- `goal: cull` 时 `edit_tasks_create` / `edit_run` 拒绝；
+- `retouch: generative` 时 `edit_run` 拒绝，改走 `photo_ai_redraw`；
+- `checkpoint: after-selection` 时 `edit_tasks_create` 第一次返回 `needsConfirmation`，`confirm: true` 后才建任务；
+- `photo_deliver` 默认使用计划里的 `outputDir` / `deliverMode`。
+
+## 输入与交付
+
+- 聊天附件：Host 侧不写工作区；`photo_session_start` 读取当前会话最后一条带附件的人类消息，通过 `attachments.imageHostPath/fileHostPath` 找到只读路径，复制到 `stateRoot/inbox/` 后作为工作区打开。
+- `photo_deliver`：
+  - `originals` 字节级复制入选原图；
+  - `rendered` 走现有 exporter；
+  - 两者都可写 `manifest.json`，并把交付目录动态加入 `FsGuard` 可写根。
 
 ## 数据与持久化
 
@@ -51,7 +80,7 @@ DSH host ──► src/dsh (plugin entry)
 
 ## 安全边界
 
-- `FsGuard`：读限于工作区与插件目录；写限于插件状态目录与导出目录；原图路径永远拒绝写入；外部命令只接收插件生成的临时文件路径。
+- `FsGuard`：读限于工作区与插件目录；写限于插件状态目录、项目导出目录和本次显式交付目录（`addWritableRoot` 按需加入，扫描会跳过它）；原图路径永远拒绝写入；外部命令只接收插件生成的临时文件路径。
 - 生成式授权：`acquireGenerative` 只接受用户授予的记录、DSH 审批提示中的"允许"，或显式配置的策略；渲染时校验每个生成图层携带的授权 ID。
 - 凭据：生成式提供者的 API key 只从配置指定的环境变量读取，不进入配置文件、日志或数据库。
 - HTTP 面板 API 经 `ctx.connection.requestRejection` 校验，只服务插件目录中的文件。

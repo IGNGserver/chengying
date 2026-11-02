@@ -5,8 +5,10 @@ import { arr, bool, defineTool, int, num, obj, str, strEnum, anyJson, type ToolI
 import { mergeDims } from '../../core/select/selector.ts'
 import { parseSelectionRequest } from '../../core/select/nl.ts'
 import { createModelScorer } from '../../core/analysis/models.ts'
-import { ChengyingError } from '../../core/util/errors.ts'
+import { ChengyingError, errorMessage } from '../../core/util/errors.ts'
 import { round } from '../../core/util/misc.ts'
+import { resolveUserPath } from '../../core/util/path.ts'
+import { existsSync, statSync } from 'node:fs'
 import type { Project } from '../../core/project.ts'
 import type { ScoreSet, SelectionSpec, Shot } from '../../core/types.ts'
 
@@ -50,27 +52,42 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
   return [
     defineTool<{ path: string; export_dir?: string }>({
       name: 'photo_workspace_open',
-      description: 'Open (or re-open) a photo workspace folder for culling and retouching. Originals are never modified; Chengying keeps its database, previews and renders in its own state directory and writes results only to the export directory. Returns the project id and a status summary.',
-      parameters: obj({ path: str('Absolute path of the folder containing the photos.'), export_dir: str('Optional export directory (default <workspace>/_chengying_export).') }, ['path']),
+      description: 'Open (or re-open) a photo workspace folder for culling and retouching. Originals are never modified; Chengying keeps its database, previews and renders in its own state directory and writes results only to the export directory. ~ and relative paths are supported. Pass a single image path to create a managed inbox instead.',
+      parameters: obj({ path: str('Photo folder, or a single image/file path. ~ and relative paths are resolved against the session workspace.'), export_dir: str('Optional delivery/export directory (default <workspace>/_chengying_export).') }, ['path']),
       async run(args, exec) {
-        const p = rt.openProject(args.path, exec.agent?.id, { exportDir: args.export_dir })
+        if (args.path.trim() === '') throw new ChengyingError('invalid-argument', 'path is required')
+        const cwd = exec.agent?.session.requestHeader()?.cwd
+        const target = resolveUserPath(args.path, cwd)
+        const exportDir = args.export_dir?.trim() === '' ? undefined : args.export_dir
+        if (!existsSync(target)) throw new ChengyingError('not-found', `path does not exist: ${target}`)
+        const p = statSync(target).isDirectory()
+          ? rt.openProject(target, exec.agent?.id, { exportDir, cwd })
+          : rt.importFiles([target], { agentId: exec.agent?.id, cwd, exportDir })
         return p.summary()
       },
     }),
 
-    defineTool<{ project?: string; steps?: string[]; force?: boolean; background?: boolean; vlm_purpose?: string }>({
+    defineTool<{ project?: string; steps?: string[]; quality?: 'fast' | 'balanced' | 'thorough'; vlm_candidates?: number; force?: boolean; background?: boolean; vlm_purpose?: string }>({
       name: 'photo_cull_run',
-      description: 'Run the automatic culling pipeline: scan (metadata, RAW+JPEG pairing, fingerprints) → previews → analyze (technical/aesthetic/composition/potential scores) → group (exact & near duplicates, scenes, travel segments, locations); optionally "models" (configured specialised scorers) and "vlm" (vision-LLM contact-sheet scoring of content/story). Incremental: unchanged files are skipped unless force=true. Large workspaces run as a background job and you are notified on completion.',
+      description: 'Run the automatic culling pipeline: scan (metadata, RAW+JPEG pairing, fingerprints) → previews → analyze (technical/aesthetic/composition/potential scores) → group (exact & near duplicates, scenes, travel segments, locations); optionally "models" (configured specialised scorers) and "vlm" (vision-LLM contact-sheet scoring of content/story). quality follows the session plan (fast / balanced / thorough) unless explicit steps are given. Incremental: unchanged files are skipped unless force=true. Large workspaces run as a background job and you are notified on completion.',
       parameters: obj({
         project: projectArg,
-        steps: arr(strEnum(['scan', 'previews', 'analyze', 'models', 'vlm', 'group'], 'step'), 'Steps to run, default ["scan","previews","analyze","group"].'),
+        steps: arr(strEnum(['scan', 'previews', 'analyze', 'models', 'vlm', 'group'], 'step'), 'Explicit steps; overrides quality.'),
+        quality: strEnum(['fast', 'balanced', 'thorough'], 'fast = classical only; balanced = + VLM candidates; thorough = + models and full VLM. Defaults to the session plan.'),
+        vlm_candidates: int('How many top candidates the VLM scores (default 120 for balanced, all for thorough).'),
         force: bool('Recompute even when cached results exist.'),
         background: bool('Force background (true) or inline (false) execution; default chooses by workspace size.'),
         vlm_purpose: str('What the user is selecting for, passed to the vision model (e.g. "travel album of Hangzhou, prefer people and landmarks").'),
       }),
       async run(args, exec) {
         const project = P(args, exec)
-        const steps = args.steps ?? ['scan', 'previews', 'analyze', 'group']
+        const plan = rt.planFor(project, exec)
+        const quality = args.quality ?? plan?.cullQuality ?? 'fast'
+        const steps = args.steps ?? (quality === 'fast'
+          ? ['scan', 'previews', 'analyze', 'group']
+          : quality === 'thorough'
+            ? ['scan', 'previews', 'analyze', 'models', 'vlm', 'group']
+            : ['scan', 'previews', 'analyze', 'vlm', 'group'])
         const files = project.repo.shotCount()
         const background = args.background ?? (files === 0 || files > rt.config.backgroundThreshold)
         const r = await rt.runMaybeBackground(exec, { kind: 'cull', label: `chengying cull ${steps.join('+')} · ${project.root}`, projectId: project.id, background }, async (signal, progress) => {
@@ -80,11 +97,19 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
           if (steps.includes('previews')) out.previews = await project.buildPreviews({ force: args.force, signal, onProgress })
           if (steps.includes('analyze')) out.analyze = await project.analyze({ force: args.force, signal, onProgress })
           if (steps.includes('models') && rt.config.models.length > 0) out.models = await project.scoreWithModels(rt.config.models, { force: args.force, signal, onProgress })
-          if (steps.includes('vlm')) {
-            const ids = project.repo.shots().filter(s => args.force === true || !Object.keys(project.repo.scores(s.id)).some(k => k.startsWith('vlm:'))).map(s => s.id).slice(0, rt.config.vlm.maxShots)
-            out.vlm = await rt.vlmScore(project, ids, exec, { purpose: args.vlm_purpose, signal, progress: (d, t) => progress('vlm', d, t) })
+          if (steps.includes('vlm') && rt.config.vlm.enabled) {
+            const limit = args.vlm_candidates ?? (quality === 'thorough' ? rt.config.vlm.maxShots : 120)
+            const ids = project.repo.shots().filter(s => args.force === true || !Object.keys(project.repo.scores(s.id)).some(k => k.startsWith('vlm:'))).map(s => s.id).slice(0, Math.max(0, limit))
+            try {
+              out.vlm = await rt.vlmScore(project, ids, exec, { purpose: args.vlm_purpose, signal, progress: (d, t) => progress('vlm', d, t) })
+            } catch (error) {
+              // Vision scoring is an enhancement; a text-only route or provider
+              // outage must not abort the classical cull.
+              out.vlm = { skipped: true, error: errorMessage(error) }
+            }
           }
           if (steps.includes('group') || steps.includes('analyze')) out.groups = project.regroup()
+          out.plan = rt.updatePlanStage(project, exec, 'culled')
           out.summary = project.summary()
           return out
         }, (res) => `culling finished: ${JSON.stringify(res.summary)}`)
@@ -102,7 +127,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         const project = P(args, exec)
         const activities = [...rt.activities.values()].filter(a => a.projectId === project.id).slice(-10)
           .map(a => ({ id: a.id, kind: a.kind, state: a.state, stage: a.stage, done: a.done, total: a.total, error: a.error, jobId: a.jobId }))
-        return { ...project.summary(), activities }
+        return { ...project.summary(), plan: rt.planFor(project, exec), activities }
       },
     }),
 
@@ -301,12 +326,17 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         if (args.count !== undefined && args.min_score === undefined) delete spec.minScore
         const { selectionId, result } = project.select(spec, { name: args.name, base: args.base_selection })
         const chosen = result.items.filter(i => i.included)
+        const plan = rt.updatePlanStage(project, exec, 'selected')
         return {
           selectionId,
           spec,
           stats: result.stats,
           shots: chosen.slice(0, args.limit ?? 60).map(i => ({ id: i.shotId, rank: i.rank, score: i.score, reason: i.reason, time: project.repo.shot(i.shotId)?.captureTime })),
           omitted: Math.max(0, chosen.length - (args.limit ?? 60)),
+          checkpoint: plan?.checkpoint ?? 'none',
+          next: plan?.checkpoint === 'after-selection'
+            ? 'Show the selection or a contact sheet to the user. After approval call edit_tasks_create with confirm=true (or photo_ai_redraw for a generative plan).'
+            : undefined,
         }
       },
     }),

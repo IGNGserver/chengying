@@ -40,7 +40,7 @@ Worktree: `~/项目/.wt/影视后期插件/<slug>`
 
 - 插件源码、开发脚本、测试与文档分层组织；新增目录时保持命名清晰，并在 README 中补充用途。
 - 依赖版本、DeepSeek Harness API 约束、目标平台和安装方式一旦确定，必须在本文件或对应文档中登记，并同步更新 Validation 与 Release 工作流。
-- 技术栈：TypeScript（Node ≥ 24.9，`node:sqlite`）、esbuild 打包、vitest；运行依赖 sharp（libvips）与 exiftool-vendored；宿主 DSH 0.2.x（`dsh.bundle` + `dsh.client`）。darktable / RawTherapee 为可选引擎，引擎测试 `pnpm test:engines` 与 DSH 端到端 `pnpm test:dsh` 需本机引擎/宿主运行时，不在 CI 中运行。
+- 技术栈：TypeScript（Node ≥ 24.9，`node:sqlite`）、esbuild 打包、vitest；运行依赖 sharp（libvips）与 exiftool-vendored；宿主 DSH ≥ 0.2.1（`dsh.bundle` + `dsh.client` + `dsh-agent-preset`）。插件分为 Host runtime/UI 与 Agent preset 两层，摄影工具只在用户选择“澄影 · 摄影后期”预设时挂载；headless/直接 `--patch` 通过 `mode: auto` 退化为单行 `both`。darktable / RawTherapee 为可选引擎，引擎测试 `pnpm test:engines` 与 DSH 端到端 `pnpm test:dsh` 需本机引擎/宿主运行时，不在 CI 中运行。
 - 架构与引擎接口覆盖见 `docs/architecture.md`、`docs/engine-coverage.md`；引擎升级后用 `chengying engines verify <engine>` 重新生成覆盖报告并更新 `docs/coverage/`。
 - 影视素材、缓存、导出包、本地宿主安装目录和凭据不属于源码，禁止提交到仓库。
 

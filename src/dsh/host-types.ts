@@ -24,11 +24,20 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; attachment: ImageAttachmentRef }
 
+export interface FileAttachmentRef {
+  attachmentId: string
+  name: string
+  bytes: number
+}
+
 export interface AgentLike {
   readonly id: string
   readonly ctx: HostContext
   readonly options: { provider?: string; model?: string; [k: string]: unknown }
-  readonly session: { requestHeader(): { config?: { provider?: string; model?: string } } | undefined; id?: string }
+  readonly session: {
+    requestHeader(): { config?: { provider?: string; model?: string }; cwd?: string; agentPreset?: string; id?: string } | undefined
+    id?: string
+  }
   inject?(message: unknown): void
   followup?(message: unknown): unknown
 }
@@ -64,6 +73,25 @@ export interface ToolsService {
 export interface AttachmentsService {
   saveImage(input: { data: Uint8Array; mediaType: ImageAttachmentRef['mediaType']; name?: string }): Promise<ImageAttachmentRef>
   imageLimits: { mediaTypes: readonly string[]; maxImageBytes: number; maxMessageImageBytes: number; maxImageDimension: number; maxImagePixels: number }
+  /** Read-only host path for an attached image, when the execution filesystem maps it. */
+  imageHostPath?(ref: ImageAttachmentRef): string | undefined
+  /** Read-only host path for a verbatim attached file. */
+  fileHostPath?(ref: FileAttachmentRef): string | undefined
+}
+
+export interface SessionEventLike {
+  type: string
+  data?: unknown
+}
+
+export interface SessionLike {
+  readonly header?: { cwd?: string; agentPreset?: string }
+  /** Detached event snapshot; used only to find attachments in the latest human prompt. */
+  snapshotEvents(): readonly SessionEventLike[]
+}
+
+export interface SessionsService {
+  get(id: string): SessionLike | undefined
 }
 
 export interface LlmChunk {
@@ -138,7 +166,9 @@ export interface SystemPromptService {
 /** The subset of the Cordis Context surface used by the plugin. */
 export interface HostContext {
   tools: ToolsService
-  get(name: string): unknown
+  get(name: string, strict?: boolean): unknown
+  /** Provide a Cordis service visible to the Host and to preset scopes. */
+  provide?(name: string, value: unknown): () => void
   effect(fn: () => (() => void) | (() => Promise<void>) | undefined | void, label?: string): unknown
   on(event: string, listener: (...args: any[]) => unknown): () => void
   inject(deps: string[], fn: (ctx: HostContext) => void): unknown

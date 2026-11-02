@@ -41,6 +41,8 @@
 
 生成式授权只有三种来源：用户在插件面板点"授权生成式修改"；`gen_authorize` / `edit_generate` 触发 DSH 审批提示且**用户点了允许**；或用户在配置里显式设置 `generative.requireApproval: false`。Agent 无法自行授予。每个生成图层记录授权 ID；含生成图层的导出写入 `XMP-iptcExt:DigitalSourceType = compositeWithTrainedAlgorithmicMedia`，撤销该图层后导出不再带此标记。
 
+批量入口 `photo_ai_redraw` 在一次 `gen_authorize({ max_uses: 张数 })` 授权下对整批照片各调用一次 provider；单张针对性微调仍用 `edit_generate`。
+
 ## 引擎与接口覆盖
 
 | 引擎 | 发现方式 | 本机实测（2026-10） |
@@ -64,7 +66,7 @@ chengying engines verify ai
 
 ## 安装
 
-需要 Node.js ≥ 24.9 与 DeepSeek Harness 0.2.x。darktable、RawTherapee 是**可选**依赖：未安装时筛图与内置引擎照常可用。
+需要 Node.js ≥ 24.9 与 DeepSeek Harness ≥ 0.2.1（`dsh-agent-preset`）。darktable、RawTherapee 是**可选**依赖：未安装时筛图与内置引擎照常可用。
 
 ```bash
 pnpm install
@@ -79,20 +81,74 @@ dsh plugin --profile web add ./chengying-<version>.tgz
 - insert:
     - id: chengying
       name: '/path/to/chengying/lib/index.js'
-      config: {}
+      config:
+        mode: both          # headless/direct patch: host + agent in one row
 ```
 
-插件会在 DSH Web 的右侧栏加一个"澄影"面板：项目概览、照片网格与评分、入选结果、修图任务（进度、错误、修订历史、前后对比滑块、执行日志）、导出与生成式授权、模型用量。
+插件会向 DSH 的新任务预设列表注册 **“澄影 · 摄影后期”**。新建对话时选择它，才会加载 36 个摄影工具和摄影工作流；普通 DSH 会话不会被摄影工具污染。右侧栏的“澄影”面板是进度与结果监视器，只在有澄影会话/工作区时才有内容。
+
+> 预设只决定工具与提示词组合，不是安全沙箱；原图只读仍由 `FsGuard` 强制。
+
+### 不使用预设
+
+- Web 中想恢复旧行为：把 Host 行 `config.mode` 设为 `both`，所有会话都会带上摄影工具。
+- Headless / 自己的 `--patch`：没有 preset roster，`mode: auto` 会自动退化为 `both`，无需额外配置。
+- 只想用 CLI：`chengying cull/select/status/engines` 不依赖 DSH 预设。
+
+### 一个典型的澄影会话
+
+```text
+（新建任务选择“澄影 · 摄影后期”）
+用户：/Volumes/trip/2026-hangzhou 这次只筛图，选 60 张，按行程讲故事，放到 /Users/me/交付/hangzhou
+Agent：photo_session_start({ path, goal: "cull", output_dir, brief })
+       → photo_cull_run → photo_select → photo_deliver({ mode: "originals" })
+```
+
+```text
+用户：这些照片修一下再交付，用编辑引擎逐项修，输出到 ~/交付/final
+Agent：photo_session_start({ path, goal: "retouch-deliver", retouch: "engine", output_dir })
+       → photo_cull_run → photo_select
+       → edit_tasks_create({ confirm: true }) → edit_run
+       → photo_deliver({ mode: "rendered" })
+```
+
+```text
+用户：直接 AI 重绘这批，统一成暖色胶片感
+Agent：photo_session_start({ ..., retouch: "generative" })
+       → photo_cull_run → photo_select
+       → gen_authorize({ max_uses: 张数 })   # 用户一次批准整批
+       → photo_ai_redraw → photo_deliver
+```
+
+### 输入：路径或聊天附件
+
+- 目录路径：`photo_session_start({ path })` / `photo_workspace_open({ path })`，支持 `~` 和相对会话工作目录的路径。
+- 单张/多张文件：`files`，或直接把图片/文件贴进聊天后调用 `photo_session_start`；插件会把附件复制到 `stateRoot/inbox/` 的托管工作区，不改动原文件。
+- 目录拖入聊天框仍受 DSH 附件 UI 限制；大目录请直接给路径。
+
+### 交付：`photo_deliver`
+
+- `mode: "originals"`：只筛图时复制入选原图（`source: raster | raw | both`），字节不变。
+- `mode: "rendered"`：全分辨率渲染，复制并校验元数据，`_recipes/` 保存 JSON 与 XMP/pp3。
+- 默认写 `manifest.json`：计划、selection、每张的源/输出/修订、是否含生成式内容、失败项。
+- `dir` 可以是任意可写目录；工具会把它加入本次任务的可写根，扫描时会跳过输出目录。
+- 交付目录默认沿用会话计划；再次调用 `photo_session_start({ output_dir })` 可以改。
+
+### AI 重绘
+
+`photo_ai_redraw` 是批量生成式模式：每张照片一次 provider 调用，不创建修图子 Agent，结果作为可回退的 `gen_layer`。它要求**一次整批授权**（`gen_authorize({ max_uses: 张数 })`），导出会写入 `XMP-iptcExt:DigitalSourceType = compositeWithTrainedAlgorithmicMedia`。没有配置 `generative.providers` 时会明确报错，不会静默退回引擎修图。
 
 ## 配置（`cordis.patch.yml` 中的 `config`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
+| `mode` | `auto` | `auto`：有 agent preset 时 Host 只挂 UI/runtime，工具由澄影预设提供；headless/无 preset 时自动 `both`。也可显式 `host` / `agent` / `both` |
 | `stateRoot` | `$CHENGYING_HOME` 或 `~/.chengying` | 数据库、预览、渲染、资产；必须在本机盘 |
 | `exportDir` | `<工作区>/_chengying_export` | 导出目录 |
 | `allowedRoots` | `[]` | 非空时只允许打开这些根目录下的工作区 |
 | `vlm` | 启用 | 视觉大模型打分（提供者/模型、批大小、联系表单元尺寸、上限） |
 | `models` | `[]` | 专用打分模型 |
+| `intake` | `maxFiles: 200`、`maxBytes: 4 GiB` | 聊天附件/文件导入托管 inbox 的上限 |
 | `engines.{darktable,rawtherapee,builtin,ai}` | 全部启用 | `path` 可指定 CLI；未指定时自动查找 |
 | `defaultEngine` | `auto` | darktable → RawTherapee → 内置 |
 | `editing` | 并发 2、重试 3 | 子 Agent 提供者、预览尺寸、子 Agent 模型 |
@@ -120,7 +176,7 @@ chengying engines [list | verify <engine>]
 
 ```bash
 pnpm typecheck
-pnpm test                    # 单元与集成测试（合成旅行照片集）
+pnpm test                    # 单元与集成测试（合成旅行照片集、预设分层、会话计划、交付、批量 AI 重绘）
 pnpm test:engines            # 需要 darktable / RawTherapee（CHENGYING_DARKTABLE_CLI / CHENGYING_RAWTHERAPEE_CLI）
 DSH_E2E_RUNTIME=<装有 @deepseek-ai/dsh 的目录> pnpm test:dsh   # 在真实 DSH 中用脚本化模型跑端到端
 ```

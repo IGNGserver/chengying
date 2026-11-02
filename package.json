@@ -1,6 +1,6 @@
 {
   "name": "chengying",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "澄影 Chengying: AI photo culling and professional retouching agent workflow for DeepSeek Harness",
   "license": "UNLICENSED",
   "private": true,
@@ -19,6 +19,7 @@
     "native",
     "catalogs",
     "cordis.patch.yml",
+    "presets",
     "locale/*.json",
     "icon.svg",
     "README.md"
@@ -28,7 +29,10 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/chengying.patch.yml"
+      ]
     },
     "client": {
       "platform": "web",
@@ -40,7 +44,7 @@
   },
   "engines": {
     "node": ">=24.9.0",
-    "dsh": ">=0.2.0 <0.3.0"
+    "dsh": ">=0.2.1-0 <0.3.0"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

@@ -1,9 +1,12 @@
-# 澄影 Chengying bundle layer. Override `config` in your profile's
-# cordis.patch.yml to tune engines, concurrency, vision model and providers.
+# Chengying bundle patch. The Host row owns the runtime and the Web panel; the
+# agent-facing tools/prompt are mounted by presets/chengying.patch.yml when the
+# user selects the Chengying preset. Set mode: both to keep the old global-tool
+# behaviour, or host/agent to pin one surface.
 - insert:
     - id: chengying
       name: 'chengying'
       config:
+        mode: auto
         editing:
           maxConcurrent: 2
         engines:
