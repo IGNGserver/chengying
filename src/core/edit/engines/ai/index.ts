@@ -23,7 +23,8 @@
 import sharp from 'sharp'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
+import { platform } from 'node:os'
 import type { EditStage, EditStep } from '../../../types.ts'
 import type { Catalog, EngineAdapter, EngineProbe, OperationSpec, RenderRequest, RenderResult, ValidatedStep } from '../../engine.ts'
 import { coverageOf, fingerprintOf, validateWithCatalog } from '../../engine.ts'
@@ -347,10 +348,27 @@ export class AiEngine implements EngineAdapter {
 
 /* ------------------------------------------------------------- utilities */
 
+/**
+ * Resolve an external command on every supported host. Windows has no /bin/sh,
+ * so a configured super-resolution command (an absolute `.exe` path) used to be
+ * reported as unavailable there and the AI catalog advertised the feature as
+ * unsupported even though it worked.
+ */
 async function commandExists(command: string): Promise<boolean> {
-  if (command.includes('/')) return existsSync(command) && statSync(command).isFile()
+  const name = command.replaceAll('"', '').trim()
+  if (name === '') return false
+  const looksLikePath = name.includes('/') || name.includes('\\') || isAbsolute(name)
+  if (looksLikePath) {
+    try { return statSync(name).isFile() } catch { return false }
+  }
+  if (platform() === 'win32') {
+    try {
+      const r = await run('where', [name], { timeoutMs: 5000 })
+      return r.code === 0 && r.stdout.trim() !== ''
+    } catch { return false }
+  }
   try {
-    const r = await run('/bin/sh', ['-c', `command -v "${command.replaceAll('"', '')}"`], { timeoutMs: 5000 })
+    const r = await run('/bin/sh', ['-c', `command -v "${name}"`], { timeoutMs: 5000 })
     return r.code === 0 && r.stdout.trim() !== ''
   } catch { return false }
 }
