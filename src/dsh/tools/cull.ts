@@ -90,7 +90,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
   return [
     defineTool<{ path: string; export_dir?: string }>({
       name: 'photo_workspace_open',
-      description: 'Open (or re-open) a photo workspace folder for culling and retouching. Originals are never modified; Chengying keeps its database, previews and renders in its own state directory and writes results only to the export directory. ~ and relative paths are supported. Pass a single image path to create a managed inbox instead.',
+      description: 'Open (or re-open) a photo workspace folder for culling and retouching. Originals are never modified; Chengying keeps its database, previews and renders in its own state directory and writes results only to the export directory. ~ and relative paths are supported. Pass a single image path to create a managed inbox inside the session workspace instead.',
       parameters: obj({ path: str('Photo folder, or a single image/file path. ~ and relative paths are resolved against the session workspace.'), export_dir: str('Optional delivery/export directory (default <workspace>/_chengying_export).') }, ['path']),
       async run(args, exec) {
         if (args.path.trim() === '') throw new ChengyingError('invalid-argument', 'path is required')
@@ -100,7 +100,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         if (!existsSync(target)) throw new ChengyingError('not-found', `path does not exist: ${target}`)
         const p = statSync(target).isDirectory()
           ? rt.openProject(target, exec.agent?.id, { exportDir, cwd })
-          : rt.importFiles([target], { agentId: exec.agent?.id, cwd, exportDir })
+          : await rt.importFiles([target], { agentId: exec.agent?.id, cwd, exportDir })
         return p.summary()
       },
     }),
@@ -131,7 +131,16 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         const r = await rt.runMaybeBackground(exec, { kind: 'cull', label: `chengying cull ${steps.join('+')} · ${project.root}`, projectId: project.id, background }, async (signal, progress) => {
           const out: Record<string, unknown> = {}
           const onProgress = (pr: { stage: string; done: number; total: number; message?: string }): void => progress(pr.stage, pr.done, pr.total, pr.message)
-          if (steps.includes('scan')) out.scan = await project.scan({ signal, onProgress })
+          if (steps.includes('scan')) {
+            const scan = await project.scan({ signal, onProgress })
+            out.scan = scan
+            if (scan.files === 0) {
+              const detail = scan.skipped > 0
+                ? `${scan.skipped} file(s) were skipped because they have no recognised image extension or header`
+                : 'the folder contains no image files'
+              throw new ChengyingError('invalid-argument', `no photos found in ${project.root} (${detail}). If these came from chat attachments, attach the originals again or pass the photo folder path; the delivery directory for this session is ${project.exportDir}.`)
+            }
+          }
           if (steps.includes('previews')) out.previews = await project.buildPreviews({ force: args.force, signal, onProgress })
           if (steps.includes('analyze')) out.analyze = await project.analyze({ force: args.force, signal, onProgress })
           if (steps.includes('models')) {
@@ -336,7 +345,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
       }),
       async run(args, exec) {
         const project = P(args, exec)
-        if (project.repo.shotCount() === 0) throw new ChengyingError('invalid-argument', 'workspace has no analysed shots; run photo_cull_run first')
+        if (project.repo.shotCount() === 0) throw new ChengyingError('invalid-argument', 'workspace has no indexed shots; run photo_cull_run and check its scan result — 0 photos usually means the folder has no supported images or the intake skipped files without a recognisable image header')
         const parsed = args.request !== undefined ? parseSelectionRequest(args.request) : {}
         const spec: SelectionSpec = {
           ...parsed,

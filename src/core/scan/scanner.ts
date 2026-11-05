@@ -15,6 +15,7 @@ import type { FileRecord, Shot } from '../types.ts'
 import type { MetadataService } from '../meta/exif.ts'
 import type { Repo } from '../store/repo.ts'
 import { RAW_EXTENSIONS, RASTER_EXTENSIONS } from '../image/preview.ts'
+import { canonicalExtension, detectImageFormat } from '../image/format.ts'
 import { isInside } from '../fsguard.ts'
 import { mapLimit } from '../util/misc.ts'
 import { errorMessage } from '../util/errors.ts'
@@ -27,6 +28,8 @@ export interface ScanOptions {
   metadata: MetadataService
   repo: Repo
   concurrency?: number
+  /** Detect extension-less files by content (default true). */
+  sniffUnknown?: boolean
   signal?: AbortSignal
   onProgress?: (p: ScanProgress) => void
 }
@@ -40,12 +43,17 @@ export interface ScanResult {
   added: number
   updated: number
   removed: number
+  /** Files seen in the workspace that were not indexed (non-photos or unreadable). */
+  skipped: number
   errors: Array<{ path: string; error: string }>
 }
 
-const SKIP_NAMES = new Set(['@eaDir', '#recycle', '$RECYCLE.BIN', 'System Volume Information', 'node_modules', '.git', '.Trashes', '.Spotlight-V100', '.fseventsd'])
+/** One walked file; an empty `ext` means the format must come from the bytes. */
+interface WalkEntry { path: string; ext: string }
 
-async function walk(root: string, skipDirs: readonly string[], out: string[], signal?: AbortSignal): Promise<void> {
+const SKIP_NAMES = new Set(['@eaDir', '#recycle', '$RECYCLE.BIN', 'System Volume Information', 'node_modules', '.git', '.Trashes', '.Spotlight-V100', '.fseventsd', '_chengying_inbox', '_chengying_export'])
+
+async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boolean, out: WalkEntry[], stats: { seen: number }, signal?: AbortSignal): Promise<void> {
   const stack = [root]
   while (stack.length > 0) {
     signal?.throwIfAborted()
@@ -63,8 +71,10 @@ async function walk(root: string, skipDirs: readonly string[], out: string[], si
         if (skipDirs.some(s => isInside(p, s))) continue
         stack.push(p)
       } else if (e.isFile()) {
+        stats.seen++
         const ext = extname(e.name).slice(1).toLowerCase()
-        if (RAW_EXTENSIONS.has(ext) || RASTER_EXTENSIONS.has(ext)) out.push(p)
+        if (RAW_EXTENSIONS.has(ext) || RASTER_EXTENSIONS.has(ext)) out.push({ path: p, ext })
+        else if (sniffUnknown) out.push({ path: p, ext: '' })
       }
     }
   }
@@ -137,26 +147,45 @@ function captureTs(f: FileRecord): number | null {
 export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const { root, repo, metadata, signal } = opts
   const conc = opts.concurrency ?? 6
-  const paths: string[] = []
+  const sniffUnknown = opts.sniffUnknown ?? true
+  const entries: WalkEntry[] = []
+  const stats = { seen: 0 }
   opts.onProgress?.({ phase: 'walk', done: 0, total: 0 })
-  await walk(root, opts.skipDirs, paths, signal)
-  paths.sort()
+  await walk(root, opts.skipDirs, sniffUnknown, entries, stats, signal)
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const errors: ScanResult['errors'] = []
   let added = 0
   let updated = 0
   let done = 0
 
-  const records = await mapLimit(paths, conc, async (path): Promise<FileRecord | undefined> => {
+  const records = await mapLimit(entries, conc, async (entry): Promise<FileRecord | undefined> => {
+    const path = entry.path
     signal?.throwIfAborted()
     try {
       const st = await stat(path)
       const prev = repo.fileByPath(path)
       if (prev !== undefined && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs) && prev.status === 'ok') {
-        opts.onProgress?.({ phase: 'metadata', done: ++done, total: paths.length, current: path })
+        opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
         return prev
       }
-      const ext = extname(path).slice(1).toLowerCase()
-      const { meta } = await metadata.read(path)
+      let ext = entry.ext
+      let fromContent = false
+      if (ext === '') {
+        const detected = await detectImageFormat(path)
+        if (detected === undefined) {
+          opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
+          return undefined
+        }
+        ext = detected.ext
+        fromContent = true
+      }
+      const { meta, raw } = await metadata.read(path)
+      if (fromContent) {
+        // TIFF containers cover DNG/CR2/NEF/...: trust ExifTool's file type
+        // when it names a format Chengying knows.
+        const refined = canonicalExtension(raw.FileTypeExtension === undefined ? undefined : String(raw.FileTypeExtension))
+        if (refined !== undefined) ext = refined
+      }
       const rec: FileRecord = {
         id: fileIdFor(path),
         shotId: null,
@@ -176,12 +205,12 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       }
       if (prev === undefined) added++
       else updated++
-      opts.onProgress?.({ phase: 'metadata', done: ++done, total: paths.length, current: path })
+      opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
       return rec
     } catch (error) {
       if (signal?.aborted) throw error
       errors.push({ path, error: errorMessage(error) })
-      opts.onProgress?.({ phase: 'metadata', done: ++done, total: paths.length, current: path })
+      opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
       return undefined
     }
   }, signal)
@@ -298,6 +327,7 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
     added,
     updated,
     removed: removedFiles,
+    skipped: Math.max(0, stats.seen - files.length),
     errors,
   }
 }

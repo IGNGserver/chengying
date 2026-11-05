@@ -30,7 +30,9 @@ export interface Config {
   /** Background job threshold: pipelines over this many files run as DSH jobs. */
   backgroundThreshold: number
   /** Chat-attachment intake limits: files copied into the managed inbox per session. */
-  intake: { maxFiles: number; maxBytes: number }
+  intake: { maxFiles: number; maxBytes: number; location: 'workspace' | 'state'; dirName: string }
+  /** Workspace scan behaviour for files without a recognised extension. */
+  scan: { sniffUnknown: boolean }
   vlm: { enabled: boolean; provider?: string; model?: string; batchSize: number; cell: number; maxShots: number; language: 'zh' | 'en'; maxTokens: number }
   models: ModelConfig[]
   engines: { darktable: EngineSetting; rawtherapee: EngineSetting; builtin: EngineSetting; ai: EngineSetting }
@@ -62,7 +64,7 @@ const engine = (enabled = true): Schema<EngineSetting> => Schema.object({
 export const Config: Schema<Config> = Schema.object({
   mode: Schema.union(['auto', 'host', 'agent', 'both'] as const).default('auto').description('auto mounts the Host UI/runtime and leaves model tools to the chengying preset when agent presets exist; headless/direct setups keep both.'),
   stateRoot: Schema.string().description('Chengying state directory (database, previews, renders). Defaults to $CHENGYING_HOME or ~/.chengying. Must be on local disk.'),
-  exportDir: Schema.string().description('Export directory. Defaults to <workspace>/_chengying_export.'),
+  exportDir: Schema.string().description('Export directory. Defaults to <workspace>/_chengying_export; chat-attachment intake defaults to <session workspace>/_chengying_export.'),
   allowedRoots: Schema.array(Schema.string()).default([]).description('Restrict workspaces to these roots (empty = any directory the user names).'),
   previewEdge: Schema.natural().default(1600),
   analysisConcurrency: Schema.natural().default(4),
@@ -70,6 +72,11 @@ export const Config: Schema<Config> = Schema.object({
   intake: Schema.object({
     maxFiles: Schema.natural().default(200),
     maxBytes: Schema.natural().default(4 * 1024 * 1024 * 1024),
+    location: Schema.union(['workspace', 'state'] as const).default('workspace').description('Where chat attachments are copied: the session workspace (default, visible next to the conversation) or the Chengying state directory (legacy, hidden).'),
+    dirName: Schema.string().default('_chengying_inbox').description('Folder inside the session workspace that receives attachment copies.'),
+  }),
+  scan: Schema.object({
+    sniffUnknown: Schema.boolean().default(true).description('Detect extension-less photos by content while scanning (chat attachments are stored without file names).'),
   }),
   vlm: Schema.object({
     enabled: Schema.boolean().default(true),

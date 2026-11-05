@@ -64,7 +64,7 @@ function uniqueTarget(dir: string, name: string): string {
   return join(dir, `${base}_${index}${ext}`)
 }
 
-function sourcesOf(project: Project, shot: Shot, source: OriginalSource): Array<{ id: string; kind: 'raw' | 'raster' }> {
+function sourcesOf(project: Project, shot: Shot, source: OriginalSource): Array<{ id: string; kind: 'raw' | 'raster'; ext: string }> {
   const raw = source === 'raster' ? null : shot.rawFile
   const raster = source === 'raw' ? null : shot.rasterFile
   const chosen = [raw, raster].filter((id): id is string => id !== null)
@@ -76,7 +76,7 @@ function sourcesOf(project: Project, shot: Shot, source: OriginalSource): Array<
   return chosen.map(id => {
     const file = project.repo.file(id)
     if (file === undefined) throw new ChengyingError('not-found', `missing file record for shot ${shot.id}`)
-    return { id: file.path, kind: file.kind }
+    return { id: file.path, kind: file.kind, ext: file.ext }
   })
 }
 
@@ -99,7 +99,10 @@ export function deliverOriginals(project: Project, opts: DeliverOriginalsOptions
     try {
       for (const src of sourcesOf(project, shot, source)) {
         const readable = project.guard.readable(src.id)
-        const target = uniqueTarget(dir, basename(readable))
+        const name = basename(readable)
+        // Extension-less intake copies keep their bytes; restore the extension
+        // the scanner recovered so the delivery opens everywhere.
+        const target = uniqueTarget(dir, extname(name) === '' && src.ext !== '' ? `${name}.${src.ext}` : name)
         project.guard.writable(target)
         copyFileSync(readable, target)
         const stat = statSync(readable)

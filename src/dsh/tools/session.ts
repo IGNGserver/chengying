@@ -28,7 +28,7 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
       brief?: string
     }>({
       name: 'photo_session_start',
-      description: 'Start or update a Chengying photo session: open a directory, import chat attachments/files into a managed inbox, and record the scope (cull only vs retouch + deliver), retouch mode (engine / generative / hybrid), cull quality, output directory and selection checkpoint. Call this first in a Chengying session. If the user already attached photos, omit path/files; the tool reads the latest human prompt attachment. To change the scope of the current workspace without importing new attachments, pass project explicitly.',
+      description: 'Start or update a Chengying photo session: open a directory, import chat attachments/files into a managed inbox inside the session workspace, and record the scope (cull only vs retouch + deliver), retouch mode (engine / generative / hybrid), cull quality, output directory and selection checkpoint. Call this first in a Chengying session. If the user already attached photos, omit path/files; the tool reads the session attachments, restores their file extensions from the Host media type, and imports them. Delivery defaults to <session workspace>/_chengying_export while the copies stay in <session workspace>/_chengying_inbox. To change the scope of the current workspace without importing new attachments, pass project explicitly.',
       parameters: obj({
         project: projectArg,
         path: str('Photo folder, or a single image/file path. ~ and relative paths are resolved against the session workspace.'),
@@ -48,7 +48,7 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         let source = project === undefined ? '' : project.root
         const hasPath = args.path !== undefined && args.path.trim() !== ''
         const hasFiles = args.files !== undefined && args.files.length > 0
-        const attachments = !hasPath && !hasFiles && args.project === undefined ? rt.attachmentPaths(exec) : []
+        const attachments = !hasPath && !hasFiles && args.project === undefined ? rt.attachmentInputs(exec) : []
 
         if (hasPath) {
           const target = resolveUserPath(args.path ?? '', cwd)
@@ -56,15 +56,15 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
           if (statSync(target).isDirectory()) {
             project = rt.openProject(target, exec.agent?.id, { exportDir: outputDir, cwd })
           } else {
-            project = rt.importFiles([target], { agentId: exec.agent?.id, cwd, exportDir: outputDir })
+            project = await rt.importFiles([target], { agentId: exec.agent?.id, cwd, exportDir: outputDir })
           }
           source = target
         } else if (hasFiles) {
           const files = args.files ?? []
-          project = rt.importFiles(files, { agentId: exec.agent?.id, cwd, exportDir: outputDir })
+          project = await rt.importFiles(files, { agentId: exec.agent?.id, cwd, exportDir: outputDir })
           source = `files:${files.length}`
         } else if (attachments.length > 0) {
-          project = rt.importFiles(attachments, { agentId: exec.agent?.id, cwd, exportDir: outputDir })
+          project = await rt.importFiles(attachments, { agentId: exec.agent?.id, cwd, exportDir: outputDir })
           source = `attachments:${attachments.length}`
         } else if (project === undefined) {
           throw new ChengyingError('invalid-argument', 'no photo source: pass a directory path, files, or attach photos in the chat first')
@@ -86,9 +86,19 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         })
         rt.savePlan(project, plan)
         project.repo.addEvent(null, 'info', 'plan', `photo session plan: ${plan.goal} · ${plan.retouch} · ${plan.deliverMode} → ${plan.outputDir}`, { plan })
+        const notes: string[] = []
+        if (attachments.some(a => a.downscaled === true)) {
+          notes.push('部分附件已被宿主规范化（缩放/重编码）；需要原始画质请直接给照片目录或原始文件路径')
+        }
+        if (source.startsWith('attachments:') || source.startsWith('files:')) {
+          notes.push(`照片副本在处理工作区 ${project.root}；成品默认交付到 ${plan.outputDir}`)
+        }
         return {
           plan,
           project: project.summary(),
+          workspace: project.root,
+          deliveryDir: plan.outputDir,
+          notes,
           next: plan.goal === 'cull'
             ? 'Call photo_cull_run, then photo_select; deliver with photo_deliver (originals).'
             : plan.retouch === 'generative'
@@ -101,7 +111,7 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
 
     defineTool<{ files: string[]; name?: string; export_dir?: string }>({
       name: 'photo_workspace_import',
-      description: 'Import explicit image/file paths (for example read-only paths from chat attachments) into a managed inbox workspace. Use photo_session_start when you also want to record the scope.',
+      description: 'Import explicit image/file paths (for example read-only paths from chat attachments) into a managed inbox workspace inside the session workspace. Host attachment objects have no extension; the tool restores one from the declared media type or the bytes. Use photo_session_start when you also want to record the scope.',
       parameters: obj({
         files: arr(str('image/file path'), 'Files to copy into the inbox.'),
         name: str('Optional inbox name.'),
@@ -110,8 +120,8 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
       async run(args, exec) {
         const cwd = exec.agent?.session.requestHeader()?.cwd
         const exportDir = args.export_dir?.trim() === '' ? undefined : args.export_dir
-        const project = rt.importFiles(args.files, { agentId: exec.agent?.id, cwd, exportDir, name: args.name })
-        return { project: project.summary() }
+        const project = await rt.importFiles(args.files, { agentId: exec.agent?.id, cwd, exportDir, name: args.name })
+        return { project: project.summary(), workspace: project.root, deliveryDir: project.exportDir }
       },
     }),
 
