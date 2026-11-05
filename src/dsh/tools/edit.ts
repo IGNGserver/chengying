@@ -38,14 +38,15 @@ export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
         const out = []
         for (const p of probes) {
           if (!p.available) { out.push({ id: p.id, available: false, reason: p.reason }); continue }
+          const health = await reg.health(p.id, { refresh: args.refresh === true, signal: exec.signal }).catch(error => ({ ok: false, catalog: 'failed' as const, render: 'skipped' as const, reason: (error as Error).message, durationMs: undefined }))
           try {
             const c = await reg.catalog(p.id, args.refresh === true, exec.signal)
-            out.push({ id: p.id, available: true, version: p.version, discovery: c.source, inputs: p.inputs, operations: c.coverage.operations, parameters: c.coverage.parameters, categories: [...new Set(c.operations.map(o => o.category))], masks: c.maskModel, extensions: c.coverage.extensions, nativeTools: c.nativeTools?.map(t => t.name), notes: c.notes })
+            out.push({ id: p.id, available: health.ok, usable: health.ok, version: p.version, discovery: c.source, inputs: p.inputs, health: { catalog: health.catalog, render: health.render, reason: health.reason, durationMs: health.durationMs }, operations: c.coverage.operations, parameters: c.coverage.parameters, categories: [...new Set(c.operations.map(o => o.category))], masks: c.maskModel, extensions: c.coverage.extensions, nativeTools: c.nativeTools?.map(t => t.name), notes: c.notes })
           } catch (error) {
-            out.push({ id: p.id, available: true, version: p.version, catalogError: (error as Error).message })
+            out.push({ id: p.id, available: false, version: p.version, health: { catalog: health.catalog, render: health.render, reason: health.reason }, catalogError: (error as Error).message })
           }
         }
-        return { engines: out }
+        return { engines: out, note: 'available=false means the engine cannot be used for editing on this machine; the reason says why.' }
       },
     }),
 

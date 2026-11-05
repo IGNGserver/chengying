@@ -13,13 +13,14 @@ import { delimiter, join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import sharp from 'sharp'
 import type { EditStage, EditStep } from '../../../types.ts'
-import type { Catalog, EngineAdapter, EngineProbe, OperationSpec, RenderRequest, RenderResult, ValidatedStep } from '../../engine.ts'
+import type { Catalog, EngineAdapter, EngineProbe, OperationSpec, RenderRequest, RenderResult, SmokeResult, ValidatedStep } from '../../engine.ts'
 import { CatalogCache, coverageOf, fingerprintOf, validateWithCatalog } from '../../engine.ts'
 import { normalizeParams, type ParamSchema } from '../../schema.ts'
 import { parsePp3, toPp3Value, writePp3, type Pp3 } from './pp3.ts'
 import { hintFor } from './hints.ts'
 import { run } from '../../../util/proc.ts'
-import { ChengyingError } from '../../../util/errors.ts'
+import { cliPath } from '../../../util/path.ts'
+import { ChengyingError, errorMessage } from '../../../util/errors.ts'
 import { isRecord, newId, nowIso } from '../../../util/misc.ts'
 
 const CATALOG_VERSION = 2
@@ -99,6 +100,31 @@ export class RawTherapeeEngine implements EngineAdapter {
     this.slots = new Array(Math.max(1, opts.maxParallel ?? 3)).fill(false)
   }
 
+  /**
+   * Render a 48×32 JPEG through the real CLI. RawTherapee handles non-raw
+   * inputs, so the smoke render exercises the same argument path (profile,
+   * output, resize) as a real photo without needing a RAW file.
+   */
+  async smokeTest(signal?: AbortSignal): Promise<SmokeResult> {
+    const dir = join(this.opts.workDir, 'smoke')
+    mkdirSync(dir, { recursive: true })
+    const input = join(dir, 'in.jpg')
+    const output = join(dir, 'out.jpg')
+    if (!existsSync(input)) await sharp({ create: { width: 48, height: 32, channels: 3, background: '#808080' } }).jpeg({ quality: 80 }).toFile(input)
+    rmSync(output, { force: true })
+    try {
+      const catalog = await this.catalog()
+      const stage: EditStage = { id: 'stage_smoke', engine: this.id, steps: [] }
+      await this.render({ input, inputKind: 'raster', stage, output, format: 'jpeg', quality: 70, maxEdge: 32, scratchDir: join(dir, 'scratch'), signal }, catalog)
+      return existsSync(output) ? { ok: true } : { ok: false, reason: 'rawtherapee-cli reported success but wrote no file' }
+    } catch (error) {
+      // A build that refuses non-raw inputs is unusual but not broken: report
+      // "skipped" so the engine stays usable for RAW work.
+      if (/unsupported|not supported|cannot load|无法/i.test(errorMessage(error))) return { ok: true, skipped: true, reason: 'smoke render skipped: this build does not accept JPEG input' }
+      return { ok: false, reason: errorMessage(error) }
+    }
+  }
+
   async probe(force = false): Promise<EngineProbe> {
     if (this.probed !== undefined && !force) return this.probed
     for (const c of candidates(this.opts.cli)) {
@@ -124,7 +150,7 @@ export class RawTherapeeEngine implements EngineAdapter {
     if (sidecar !== undefined) writeFileSync(`${probe}.pp3`, sidecar)
     const out = join(dir, `${name}-out.jpg`)
     rmSync(`${out}.pp3`, { force: true })
-    const args = ['-O', out, ...(sidecar !== undefined ? ['-s'] : []), '-Y', '-c', probe]
+    const args = ['-O', cliPath(out), ...(sidecar !== undefined ? ['-s'] : []), '-Y', '-c', cliPath(probe)]
     const r = await run(this.cli as string, args, { timeoutMs: 120_000, env: rtEnv(join(this.opts.workDir, 'settings-probe')), signal })
     if (!existsSync(`${out}.pp3`)) throw new ChengyingError('engine-failed', `rawtherapee-cli did not write a profile (${r.code}): ${(r.stderr || r.stdout).slice(-500)}`)
     return parsePp3(readFileSync(`${out}.pp3`, 'utf8'))
@@ -260,14 +286,14 @@ export class RawTherapeeEngine implements EngineAdapter {
     rmSync(out, { force: true })
     const args: string[] = []
     if (opts.base !== 'neutral') args.push('-d')
-    for (const prof of (opts.profiles as string[] | undefined) ?? []) args.push('-p', req.readable !== undefined ? req.readable(prof) : prof)
-    args.push('-p', ppPath, '-o', out, '-Y')
+    for (const prof of (opts.profiles as string[] | undefined) ?? []) args.push('-p', cliPath(req.readable !== undefined ? req.readable(prof) : prof))
+    args.push('-p', cliPath(ppPath), '-o', cliPath(out), '-Y')
     if (opts.fast === true) args.push('-f')
     if (req.format === 'jpeg') args.push(`-j${req.quality ?? 92}`, `-js${opts.jpeg_subsampling ?? 3}`)
     else if (req.format === 'tiff') args.push('-tz', `-b${req.bitDepth ?? 16}`)
     else args.push('-n', `-b${req.bitDepth ?? 8}`)
     // RawTherapee resolves sidecars next to the input; give it a private copy-free path by passing the original read-only.
-    args.push('-c', req.input)
+    args.push('-c', cliPath(req.input))
     const slot = await this.acquire(req.signal)
     try {
       let r = await run(this.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, env: rtEnv(join(this.opts.workDir, `settings-${slot}`)), cwd: req.scratchDir })

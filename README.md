@@ -54,6 +54,8 @@
 
 引擎升级后，目录按"二进制路径 + 版本 + 修改时间"指纹自动重新发现，新增的模块/参数无需改代码即可调用。详细方法、未覆盖项与原因见 [docs/engine-coverage.md](docs/engine-coverage.md)，原始报告在 `docs/coverage/`。
 
+`edit_engines` 现在同时给出**能不能用**（`usable` / `health`）：除了找到可执行文件，还会真的建一次目录、用 48×32 的图渲染一次；渲染不通的引擎不会参与 `auto` 选择，`edit_engines` 里会写明原因（例如 darktable 在 Windows 上输出路径被吞）。
+
 复现覆盖验证：
 
 ```bash
@@ -63,6 +65,20 @@ chengying engines verify rawtherapee --input <某个 RAW> --report rawtherapee.j
 chengying engines verify builtin
 chengying engines verify ai
 ```
+
+### 平台支持
+
+| 平台 | 状态 | 说明 |
+|---|---|---|
+| macOS（arm64/x86_64） | 完整 | darktable（原生探测 / 快照 / MCP）、RawTherapee、内置、AI |
+| Linux（x86_64） | 完整 | 同上 |
+| Windows（x86_64） | 完整，见下 | darktable 通过**目录快照**或 **darktable-mcp（5.7+）** 发现模块；`native/dt-introspect.c` 依赖 `dlopen`/`fork`，Windows 上不参与 |
+
+Windows 上的几条硬约束（0.4.2 起已处理，CI 有独立 Windows job）：
+
+- **传给外部引擎的路径一律用 `/`**（`cliPath()`）。`darktable-cli` 把输出参数当模式串解析，`\` 会被当转义符吃掉——`C:\a\b.jpg` 会被导出成 `C:ab.jpg`，退出码仍是 0。
+- darktable 模块目录按版本匹配：精确版本优先，同 `major.minor` 的快照可降级使用并给出提示。
+- 手机 DNG（小米、iPhone ProRAW 等）是 CFA 压缩数据，libvips 解不了、也常常没有内嵌 JPEG：**装一个 RAW 引擎**（darktable 或 RawTherapee）后，澄影会自动用它显影预览/代理图；没有引擎时 `photo_preview` 与 `photo_cull_run` 会直接说明原因，而不是抛 libvips 的 `vips_colourspace` 错误。
 
 ## 安装
 
@@ -169,8 +185,10 @@ Agent：photo_session_start({ ..., retouch: "generative" })
 chengying cull <工作区>
 chengying select <工作区> "选 20 张，多样一点"
 chengying status <工作区>
-chengying engines [list | verify <engine>]
+chengying engines [list | doctor | preview <file> | verify <engine>]
 ```
+
+`engines doctor` 回答"这台机器上哪个引擎真的能用"：建目录 + 渲染一张 48×32 的图，输出 `health.catalog` / `health.render` / `health.reason`，可用于排查"装了 darktable 但一修就报错"。`engines preview <raw>` 用指定引擎做一次中性显影，验证 RAW 解码与输出路径，不打开工作区。
 
 ## 开发
 

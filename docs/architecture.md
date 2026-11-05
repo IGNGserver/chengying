@@ -66,12 +66,16 @@ DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会�
 
 ## 引擎适配层
 
-每个引擎实现 `EngineAdapter`：`probe`（可用性、版本、指纹）、`catalog`（完整操作目录 + JSON Schema）、`validateStep`、`render`、`recipe`（原生配方）、`importRecipe`、可选 `callNative`。
+每个引擎实现 `EngineAdapter`：`probe`（可用性、版本、指纹）、`catalog`（完整操作目录 + JSON Schema）、`validateStep`、`render`、`recipe`（原生配方）、`importRecipe`、可选 `smokeTest`（真实渲染一张 48×32 的图，`health` 用）、可选 `callNative`。`probe` 只回答"装没装"，`health`（注册表缓存，按指纹失效）回答"能不能用"，`pick()` 只从健康引擎里选。
 
-- **darktable**：C 助手 `dt-introspect` 在 fork 出的子进程里逐个 dlopen iop 模块，导出 introspection 字段树（结构体、数组、枚举、联合、浮点范围/默认值）、默认混合色彩空间、混合参数版本和管线顺序；针对 `tonecurve`、`rgbcurve`、`basecurve`、`colorzones` 等样条曲线模块额外提供 `curves` 点对高层语法糖并自动展开为底层结构体数组；适配器按字段布局把 JSON 参数编码为二进制 params，写 XMP v5 历史（含蒙版 `masks_history`、绘制形状、参数化混合），用 `darktable-cli` 渲染；多实例使用自定义 iop 顺序。darktable 5.7+ 提供 darktable-mcp 时改用 MCP 获取目录与编解码。
+- **darktable**：模块发现顺序为 darktable-mcp（5.7+）→ 随包目录快照（精确版本，缺省时降级到同 minor）→ C 助手 `dt-introspect`（POSIX：在 fork 出的子进程里逐个 dlopen iop 模块，导出 introspection 字段树、默认混合色彩空间、混合参数版本和管线顺序）。针对 `tonecurve`、`rgbcurve`、`basecurve`、`colorzones` 等样条曲线模块额外提供 `curves` 点对高层语法糖并自动展开为底层结构体数组；适配器按字段布局把 JSON 参数编码为二进制 params，写 XMP v5 历史（含蒙版 `masks_history`、绘制形状、参数化混合），用 `darktable-cli` 渲染；多实例使用自定义 iop 顺序。
 - **RawTherapee**：`-O` 导出完整 pp3 键空间，结合源码派生的类型/范围提示生成 schema；Locallab 局部调整点作为数组参数；渲染用 sidecar pp3（`-p`），并用 `dumpProfile` 回读 RT 实际使用的配置。
 - **内置**：线性光浮点管线（libvips 解码/编码），23 个操作，所有非几何操作支持绘制 + 参数化蒙版。
 - **AI**：见 README 第 3 阶段。生成式结果作为资产保存，`gen_layer` 只做合成，因此渲染确定。
+
+所有交给外部进程的路径都经 `cliPath()`（Windows 下转成 `/`）：`darktable-cli` 会把输出参数当模式串解析，反斜杠被当转义符吃掉，导致"退出码 0 但没有写文件"。
+
+**预览回退链**：`makePreview` 依次尝试 libvips 解码 → 内嵌 JPEG → **已安装的 RAW 引擎显影**（`Project.options.rawFallback`，由运行时接到 `EngineRegistry`）→ TIFF IFD0 → macOS `sips`。手机 DNG 这类 CFA 压缩数据只能走引擎这一步；没有引擎时返回带 `hint` 的错误，而不是把 `vips_colourspace` 的原话抛给 Agent。`photo_preview` 复用同一条路径，且不创建修图任务。
 
 渲染在阶段之间传递 16 位 TIFF；预览在第一阶段缩小，后续阶段收到 `previewEdge` 与 `fullEdge`，像素尺寸类参数按比例缩放。
 

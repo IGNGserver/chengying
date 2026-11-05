@@ -11,15 +11,16 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import type { EditStage, EditStep } from '../../../types.ts'
-import type { Catalog, EngineAdapter, EngineProbe, OperationSpec, RenderRequest, RenderResult, ValidatedStep } from '../../engine.ts'
+import type { Catalog, EngineAdapter, EngineProbe, OperationSpec, RenderRequest, RenderResult, SmokeResult, ValidatedStep } from '../../engine.ts'
 import { CatalogCache, coverageOf, fingerprintOf, validateWithCatalog } from '../../engine.ts'
 import { normalizeParams, type ParamSchema } from '../../schema.ts'
 import { locateDarktable, type DarktableInstall } from './locate.ts'
-import { DarktableMcp, introspectNative, snapshotFor, type DtIntrospection } from './introspect.ts'
+import { DarktableMcp, introspectNative, nativeIntrospectionHint, snapshotFor, type DtIntrospection } from './introspect.ts'
 import { decodeParams, encodeParams, expandCurveSugar, paramsSchema, type DtModule } from './codec.ts'
 import { applyMask, BLEND_SCHEMA, blendColorspaceFor, decodeBlend, defaultBlend, encodeBlend, SUPPORTED_BLEND_VERSION, type DtForm } from './blend.ts'
 import { buildXmp, parseDtStyle, parseXmpHistory, type DtHistoryItem, type ImportedItem } from './xmp.ts'
 import { run } from '../../../util/proc.ts'
+import { cliPath } from '../../../util/path.ts'
 import { ChengyingError, errorMessage } from '../../../util/errors.ts'
 import { newId, nowIso } from '../../../util/misc.ts'
 
@@ -78,8 +79,8 @@ export class DarktableEngine implements EngineAdapter {
       return this.probed
     }
     this.install = found
-    let mode = found.mcp !== undefined && this.opts.preferMcp !== false ? 'mcp' : 'introspection'
-    if (mode === 'introspection' && snapshotFor(found.version) !== undefined && found.pluginDir === undefined) mode = 'snapshot'
+    const snapshot = snapshotFor(found.version)
+    let mode = found.mcp !== undefined && this.opts.preferMcp !== false ? 'mcp' : snapshot !== undefined ? 'snapshot' : 'introspection'
     this.probed = {
       id: this.id,
       available: true,
@@ -90,6 +91,28 @@ export class DarktableEngine implements EngineAdapter {
       inputs: { raw: true, raster: true },
     }
     return this.probed
+  }
+
+  /**
+   * Render a 48×32 JPEG through the real CLI. probe() only proves the binary
+   * exists; on Windows darktable-cli "succeeds" while writing the export to a
+   * mangled path, so only an actual render tells us the engine is usable.
+   */
+  async smokeTest(signal?: AbortSignal): Promise<SmokeResult> {
+    const dir = join(this.opts.workDir, 'smoke')
+    mkdirSync(dir, { recursive: true })
+    const input = join(dir, 'in.jpg')
+    const output = join(dir, 'out.jpg')
+    if (!existsSync(input)) await sharp({ create: { width: 48, height: 32, channels: 3, background: '#808080' } }).jpeg({ quality: 80 }).toFile(input)
+    rmSync(output, { force: true })
+    try {
+      const catalog = await this.catalog()
+      const stage: EditStage = { id: 'stage_smoke', engine: this.id, steps: [] }
+      await this.render({ input, inputKind: 'raster', stage, output, format: 'jpeg', quality: 70, maxEdge: 32, scratchDir: join(dir, 'scratch'), signal }, catalog)
+      return existsSync(output) ? { ok: true } : { ok: false, reason: 'darktable-cli reported success but wrote no file (path escaping?)' }
+    } catch (error) {
+      return { ok: false, reason: errorMessage(error) }
+    }
   }
 
   private async introspect(signal?: AbortSignal): Promise<DtIntrospection> {
@@ -107,6 +130,24 @@ export class DarktableEngine implements EngineAdapter {
         this.mcp = undefined
       }
     }
+    // A shipped snapshot is cheap and deterministic, so prefer it over compiling
+    // the native helper. The helper is POSIX-only (dlopen/fork) and cannot be
+    // built on Windows at all; trying it first made every Windows install fail
+    // unless the exact snapshot version happened to be shipped.
+    if (this.intro === undefined) {
+      const snap = snapshotFor(install.version)
+      if (snap !== undefined) {
+        this.intro = {
+          source: 'snapshot',
+          blendVersion: snap.catalog.blendVersion,
+          modules: snap.catalog.modules,
+          iopOrders: snap.catalog.iopOrders,
+          notes: [snap.exact
+            ? `using shipped snapshot for darktable ${install.version}`
+            : `using shipped snapshot for darktable ${snap.version} (installed ${install.version}); module set may differ slightly`],
+        }
+      }
+    }
     if (this.intro === undefined) {
       try {
         this.intro = await introspectNative(install, this.opts.workDir, signal)
@@ -115,10 +156,12 @@ export class DarktableEngine implements EngineAdapter {
       }
     }
     if (this.intro === undefined) {
-      const snap = snapshotFor(install.version)
-      if (snap !== undefined) this.intro = { source: 'snapshot', blendVersion: snap.blendVersion, modules: snap.modules, iopOrders: snap.iopOrders, notes: [`using shipped snapshot for darktable ${install.version}`] }
+      throw new ChengyingError('engine-unavailable', `cannot discover darktable modules: ${errors.join('; ') || nativeIntrospectionHint(install.version)}`, {
+        engine: 'darktable',
+        version: install.version,
+        hint: nativeIntrospectionHint(install.version),
+      })
     }
-    if (this.intro === undefined) throw new ChengyingError('engine-unavailable', `cannot discover darktable modules: ${errors.join('; ')}`)
     this.intro.notes.push(...errors)
     this.modules = new Map(this.intro.modules.map(m => [m.operation, m]))
     return this.intro
@@ -328,13 +371,16 @@ export class DarktableEngine implements EngineAdapter {
     try {
       const configDir = join(this.opts.workDir, `config-${slot}`)
       mkdirSync(configDir, { recursive: true })
-      const args = [req.input, xmpPath, out, '--hq', String(opts.hq !== false), '--upscale', String(opts.upscale === true), '--apply-custom-presets', 'false']
+      // Every path argument goes through cliPath: darktable-cli parses the
+      // output argument as a pattern string and eats `\` as an escape, so a
+      // Windows path would be written to a mangled name (exit code 0, no file).
+      const args = [cliPath(req.input), cliPath(xmpPath), cliPath(out), '--hq', String(opts.hq !== false), '--upscale', String(opts.upscale === true), '--apply-custom-presets', 'false']
       if (req.maxEdge !== undefined && req.maxEdge > 0) args.push('--width', String(req.maxEdge), '--height', String(req.maxEdge))
       if (typeof opts.style === 'string' && opts.style !== '') { args.push('--style', opts.style); if (opts.style_overwrite === true) args.push('--style-overwrite') }
       if (typeof opts.icc_type === 'string') args.push('--icc-type', opts.icc_type)
-      if (typeof opts.icc_file === 'string') args.push('--icc-file', opts.icc_file)
+      if (typeof opts.icc_file === 'string') args.push('--icc-file', cliPath(opts.icc_file))
       if (typeof opts.icc_intent === 'string') args.push('--icc-intent', opts.icc_intent)
-      args.push('--core', '--configdir', configDir, '--library', ':memory:', '--conf', 'write_sidecar_files=never', '--disable-opencl')
+      args.push('--core', '--configdir', cliPath(configDir), '--library', ':memory:', '--conf', 'write_sidecar_files=never', '--disable-opencl')
       if (req.format === 'jpeg') args.push('--conf', `plugins/imageio/format/jpeg/quality=${req.quality ?? 92}`)
       if (req.format === 'tiff') args.push('--conf', `plugins/imageio/format/tiff/bpp=${req.bitDepth ?? 16}`, '--conf', 'plugins/imageio/format/tiff/compress=2')
       if (req.format === 'png') args.push('--conf', `plugins/imageio/format/png/bpp=${req.bitDepth ?? 8}`)

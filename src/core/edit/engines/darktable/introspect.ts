@@ -44,6 +44,22 @@ export function packageFile(rel: string): string | undefined {
   return undefined
 }
 
+/**
+ * Native introspection runs `native/dt-introspect.c`, which dlopens the module
+ * binaries and probes each one in a forked child. Neither dlopen nor fork
+ * exists on Windows, so the helper is POSIX-only: on win32 we say so instead of
+ * trying to compile it and surfacing a `dlfcn.h: No such file` error.
+ */
+export const NATIVE_INTROSPECTION_SUPPORTED = platform() !== 'win32'
+
+export function nativeIntrospectionHint(version?: string): string {
+  if (!NATIVE_INTROSPECTION_SUPPORTED) {
+    return `darktable ${version ?? ''}`.trim() +
+      ': native module discovery is POSIX-only. Use a darktable build that ships darktable-mcp (5.7+) or a version covered by the catalog snapshots in catalogs/, or set engines.darktable.path to one of those.'
+  }
+  return 'install a C compiler (cc/clang/gcc) or use a darktable build with darktable-mcp, or a version covered by catalogs/'
+}
+
 async function compiler(): Promise<string | undefined> {
   for (const cc of [process.env.CC, 'cc', 'clang', 'gcc'].filter((x): x is string => x !== undefined && x !== '')) {
     try {
@@ -56,6 +72,7 @@ async function compiler(): Promise<string | undefined> {
 
 /** Build (once) the helper binary laid out so that @executable_path/../Resources resolves on macOS bundles. */
 export async function buildHelper(install: DarktableInstall, workDir: string): Promise<string> {
+  if (!NATIVE_INTROSPECTION_SUPPORTED) throw new ChengyingError('engine-unavailable', nativeIntrospectionHint(install.version))
   const src = packageFile('native/dt-introspect.c')
   if (src === undefined) throw new ChengyingError('engine-unavailable', 'native/dt-introspect.c is missing from the package')
   const source = readFileSync(src)
@@ -65,7 +82,7 @@ export async function buildHelper(install: DarktableInstall, workDir: string): P
   const exe = join(exeDir, 'dt-introspect')
   if (existsSync(exe)) return exe
   const cc = await compiler()
-  if (cc === undefined) throw new ChengyingError('engine-unavailable', 'no C compiler (cc/clang/gcc) to build the darktable introspection helper')
+  if (cc === undefined) throw new ChengyingError('engine-unavailable', `no C compiler (cc/clang/gcc) to build the darktable introspection helper; ${nativeIntrospectionHint(install.version)}`)
   mkdirSync(exeDir, { recursive: true })
   if (install.bundle !== undefined) {
     const link = join(base, 'Contents', 'Resources')
@@ -94,12 +111,36 @@ export async function introspectNative(install: DarktableInstall, workDir: strin
   return { source: 'native', blendVersion: parsed.blendVersion, modules: parsed.modules, iopOrders: parsed.iopOrders, helper, notes }
 }
 
-export function snapshotFor(version: string): { blendVersion: number; modules: DtModule[]; iopOrders?: Record<string, string> } | undefined {
+export interface DtSnapshot {
+  /** Version the snapshot was dumped from. */
+  version: string
+  exact: boolean
+  catalog: { blendVersion: number; modules: DtModule[]; iopOrders?: Record<string, string> }
+}
+
+/**
+ * Find a shipped catalog for the installed darktable. Versions are matched
+ * exactly first; when the patch release differs (5.6.2 installed, 5.6.1
+ * snapshot) the snapshot from the same major.minor is used with a warning,
+ * because module/parameter layouts only change between minor releases.
+ * Requiring an exact patch match made the engine unusable on every darktable
+ * update — and on Windows the only alternative (the POSIX native helper) cannot
+ * even be compiled.
+ */
+export function snapshotFor(version: string): DtSnapshot | undefined {
   const dir = packageFile('catalogs')
   if (dir === undefined) return undefined
-  const name = readdirSync(dir).find(f => f === `darktable-${version}.json`)
-  if (name === undefined) return undefined
-  return JSON.parse(readFileSync(join(dir, name), 'utf8')) as { blendVersion: number; modules: DtModule[]; iopOrders?: Record<string, string> }
+  const files = readdirSync(dir).filter(f => /^darktable-.+\.json$/.test(f))
+  const available = files.map(f => ({ file: f, version: f.replace(/^darktable-/, '').replace(/\.json$/, '') }))
+  const read = (file: string): DtSnapshot['catalog'] => JSON.parse(readFileSync(join(dir, file), 'utf8')) as DtSnapshot['catalog']
+  const exact = available.find(a => a.version === version)
+  if (exact !== undefined) return { version: exact.version, exact: true, catalog: read(exact.file) }
+  const family = /^(\d+)\.(\d+)/.exec(version)
+  if (family !== null) {
+    const sameMinor = available.filter(a => a.version.startsWith(`${family[1]}.${family[2]}.`)).sort((x, y) => x.version.localeCompare(y.version, undefined, { numeric: true })).pop()
+    if (sameMinor !== undefined) return { version: sameMinor.version, exact: false, catalog: read(sameMinor.file) }
+  }
+  return undefined
 }
 
 /* -------------------------------------------------------------- MCP mode */

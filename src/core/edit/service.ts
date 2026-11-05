@@ -436,6 +436,33 @@ export class EditService {
     }
   }
 
+  /**
+   * Develop the untouched source (no steps) so an original/final comparison is
+   * possible for RAW shots whose preview pipeline failed. Cached per task+edge:
+   * the result only changes when the source file or engine changes.
+   */
+  async renderOriginal(taskId: string, opts: { maxEdge?: number; signal?: AbortSignal } = {}): Promise<string> {
+    const task = this.task(taskId)
+    const shot = this.project.repo.shot(task.shotId)
+    if (shot === undefined) throw new ChengyingError('not-found', `no such shot: ${task.shotId}`)
+    const edge = opts.maxEdge ?? 900
+    const dir = this.project.path('renders', taskId)
+    mkdirSync(dir, { recursive: true })
+    const out = this.project.guard.writable(join(dir, `original-${edge}.jpg`))
+    if (existsSync(out)) return out
+    const head = this.head(taskId)
+    const first = head.doc.stages[0]
+    const primary = this.project.repo.file(shot.primaryFile)
+    const kind = primary?.kind === 'raw' ? 'raw' : 'raster'
+    const engine = first?.engine ?? task.engine ?? (await this.engines.pick(kind))
+    const doc: EditDocument = {
+      ...head.doc,
+      stages: [{ id: `stage_original_${engine}`, engine, steps: [], ...(first?.options !== undefined ? { options: first.options } : {}) }],
+    }
+    const rendered = await this.renderDoc(shot, doc, { maxEdge: edge, format: 'jpeg', quality: 90, output: out, signal: opts.signal, taskId })
+    return rendered.path
+  }
+
   /** Labeled side-by-side comparison image (original preview vs. revision, or two revisions). */
   async compare(taskId: string, opts: { revisionId?: string; againstRevisionId?: string; maxEdge?: number; signal?: AbortSignal } = {}): Promise<{ path: string; left: string; right: string }> {
     const task = this.task(taskId)
@@ -448,8 +475,15 @@ export class EditService {
       leftLabel = `rev ${this.project.repo.revision(opts.againstRevisionId)?.seq ?? ''}`
     } else {
       const shot = this.project.repo.shot(task.shotId) as Shot
-      if (shot.previewPath === null) throw new ChengyingError('not-found', 'no original preview')
-      leftPath = shot.previewPath
+      if (shot.previewPath === null) {
+        // RAW without a libvips preview (CFA data, no embedded JPEG): develop
+        // the untouched source through the task's engine so the comparison
+        // still shows original | edited.
+        leftPath = await this.renderOriginal(taskId, { maxEdge: edge, signal: opts.signal })
+        leftLabel = 'original (developed)'
+      } else {
+        leftPath = shot.previewPath
+      }
     }
     const rightSeq = opts.revisionId !== undefined ? this.project.repo.revision(opts.revisionId)?.seq : this.head(taskId).seq
     const h = 600

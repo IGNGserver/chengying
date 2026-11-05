@@ -15,6 +15,31 @@ import type { ScoreSet, SelectionSpec, Shot } from '../../core/types.ts'
 const projectArg = str('Project id or workspace path; defaults to the workspace opened most recently in this session.')
 
 /**
+ * Keep pipeline output small enough to survive the host's tool-result limit.
+ * A batch of phone DNGs produces one multi-line libvips message per file, which
+ * made `photo_cull_run` return >24 KB and get truncated — losing the analysis
+ * and group summary that follow. Full messages stay in the project database and
+ * in `photo_status`.
+ */
+export type CompactedStep<T> = Omit<T, 'failed'> & { failed?: Array<{ shotId: string; error: string }>; failedCount?: number; failedTruncated?: boolean }
+
+export function compactStep<T extends { failed?: Array<{ shotId: string; error: string }> }>(result: T, detail: boolean): CompactedStep<T> {
+  const failed = result.failed
+  if (failed === undefined || failed.length === 0) return result
+  const clip = (s: string): string => {
+    const oneLine = s.replace(/\s+/g, ' ').trim()
+    return oneLine.length > 180 ? `${oneLine.slice(0, 180)}…` : oneLine
+  }
+  const shown = detail ? failed : failed.slice(0, 5)
+  return {
+    ...result,
+    failed: shown.map(f => ({ shotId: f.shotId, error: clip(f.error) })),
+    failedCount: failed.length,
+    ...(detail ? {} : { failedTruncated: true }),
+  }
+}
+
+/**
  * Pick shots for VLM contact-sheet review:
  *  - For multi-shot near-duplicate / burst groups, include the top 2 contenders
  *    side by side so the VLM can compare expressions, eyes and framing within
@@ -105,9 +130,9 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
       },
     }),
 
-    defineTool<{ project?: string; steps?: string[]; quality?: 'fast' | 'balanced' | 'thorough'; vlm_candidates?: number; force?: boolean; background?: boolean; vlm_purpose?: string }>({
+    defineTool<{ project?: string; steps?: string[]; quality?: 'fast' | 'balanced' | 'thorough'; vlm_candidates?: number; force?: boolean; background?: boolean; vlm_purpose?: string; detail?: boolean }>({
       name: 'photo_cull_run',
-      description: 'Run the automatic culling pipeline: scan (metadata, RAW+JPEG pairing, fingerprints) → previews → analyze (technical/aesthetic/composition/potential scores) → group (exact & near duplicates, scenes, travel segments, locations); optionally "models" (configured specialised scorers) and "vlm" (vision-LLM contact-sheet scoring of content/story). quality follows the session plan (fast / balanced / thorough) unless explicit steps are given. Incremental: unchanged files are skipped unless force=true. Large workspaces run as a background job and you are notified on completion.',
+      description: 'Run the automatic culling pipeline: scan (metadata, RAW+JPEG pairing, fingerprints) → previews → analyze (technical/aesthetic/composition/potential scores) → group (exact & near duplicates, scenes, travel segments, locations); optionally "models" (configured specialised scorers) and "vlm" (vision-LLM contact-sheet scoring of content/story). quality follows the session plan (fast / balanced / thorough) unless explicit steps are given. Incremental: unchanged files are skipped unless force=true. Large workspaces run as a background job and you are notified on completion. Per-file failure lists are capped at 5 entries with the total count; pass detail=true for the full list.',
       parameters: obj({
         project: projectArg,
         steps: arr(strEnum(['scan', 'previews', 'analyze', 'models', 'vlm', 'group'], 'step'), 'Explicit steps; overrides quality.'),
@@ -116,6 +141,7 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         force: bool('Recompute even when cached results exist.'),
         background: bool('Force background (true) or inline (false) execution; default chooses by workspace size.'),
         vlm_purpose: str('What the user is selecting for, passed to the vision model (e.g. "travel album of Hangzhou, prefer people and landmarks").'),
+        detail: bool('Return the complete per-file failure list instead of the first 5 entries.'),
       }),
       async run(args, exec) {
         const project = P(args, exec)
@@ -141,8 +167,8 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
               throw new ChengyingError('invalid-argument', `no photos found in ${project.root} (${detail}). If these came from chat attachments, attach the originals again or pass the photo folder path; the delivery directory for this session is ${project.exportDir}.`)
             }
           }
-          if (steps.includes('previews')) out.previews = await project.buildPreviews({ force: args.force, signal, onProgress })
-          if (steps.includes('analyze')) out.analyze = await project.analyze({ force: args.force, signal, onProgress })
+          if (steps.includes('previews')) out.previews = compactStep(await project.buildPreviews({ force: args.force, signal, onProgress }), args.detail === true)
+          if (steps.includes('analyze')) out.analyze = compactStep(await project.analyze({ force: args.force, signal, onProgress }), args.detail === true)
           if (steps.includes('models')) {
             const models = rt.config.models.length > 0 ? rt.config.models : [{ id: 'builtin-portrait', type: 'builtin' as const }]
             out.models = await project.scoreWithModels(models, { force: args.force, signal, onProgress })
@@ -265,12 +291,41 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         if (ids.length === 1) {
           const s = project.repo.shot(ids[0] as string) as Shot
           path = (args.variant === 'thumb' ? s.thumbPath : s.previewPath) ?? s.previewPath ?? ''
-          if (path === '') throw new ChengyingError('not-found', 'shot has no preview yet; run photo_cull_run first')
+          if (path === '') throw new ChengyingError('not-found', 'shot has no preview yet', { hint: 'call photo_preview for this shot (develops a proxy through the RAW engine), or run photo_cull_run after installing an engine' })
         } else {
           path = (await project.sheet(ids, { labels, cell: args.variant === 'preview' ? 560 : 360, columns: args.columns })).path
         }
         const { image, reason } = await rt.imageForModel(path, exec, { maxEdge: ids.length === 1 ? 1568 : 2000, caption: ids.length === 1 ? ids[0] : 'contact sheet' })
         return { legend, images: image === undefined ? [] : [image as ToolImage], note: reason }
+      },
+    }),
+
+    defineTool<{ project?: string; shots: string[]; size?: number; engine?: string }>({
+      name: 'photo_preview',
+      description: 'Render a viewable preview of one or more shots WITHOUT creating an editing task: the cull preview when it exists, otherwise a proxy developed through the installed RAW engine (adopted as the shot preview). Use this for a batch whose culling previews failed, or to look at a source before deciding what to edit. Returns image attachments plus the settings each proxy was developed with.',
+      parameters: obj({
+        project: projectArg,
+        shots: arr(str('shot id'), '1-4 shot ids.'),
+        size: int('Long edge in pixels (default 1400).'),
+        engine: strEnum(['auto', 'darktable', 'rawtherapee'], 'RAW engine for the proxy (default auto: first usable).'),
+      }, ['shots']),
+      async run(args, exec) {
+        const project = P(args, exec)
+        const ids = args.shots.slice(0, 4)
+        if (ids.length === 0) throw new ChengyingError('invalid-argument', 'pass at least one shot id')
+        const edge = args.size ?? 1400
+        const legend: Array<Record<string, unknown>> = []
+        const images: ToolImage[] = []
+        for (const id of ids) {
+          const shot = project.repo.shot(id)
+          if (shot === undefined) throw new ChengyingError('not-found', `no shot ${id}`)
+          const proxy = await rt.proxyForShot(project, shot, { maxEdge: edge, engine: args.engine, signal: exec.signal })
+          legend.push({ shot: id, source: proxy.source, size: edge, ...shotRow(project, shot) })
+          const { image, reason } = await rt.imageForModel(proxy.path, exec, { maxEdge: Math.min(edge, 1568), caption: id })
+          if (image !== undefined) images.push(image as ToolImage)
+          else if (reason !== undefined) legend[legend.length - 1] = { ...legend[legend.length - 1], note: reason }
+        }
+        return { previews: legend, images, note: 'These previews come from the RAW engine, not from libvips; photo_cull_run will reuse them as shot previews.' }
       },
     }),
 

@@ -61,3 +61,36 @@ jobs:
 
       - name: Unit and integration tests
         run: pnpm test
+
+  # Windows is a supported host, and several engine behaviours differ there
+  # (darktable-cli parses its output argument as a pattern string, the native
+  # introspection helper is POSIX-only, path separators, ExifTool precision).
+  # Keep a second job on the real platform so those paths cannot regress.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Unit and integration tests
+        run: pnpm test

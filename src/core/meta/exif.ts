@@ -44,10 +44,32 @@ const NUMERIC_TOLERANCE: Record<string, number> = {
   GPSLatitude: 1e-6,
   GPSLongitude: 1e-6,
   GPSAltitude: 0.05,
-  ExposureTime: 1e-9,
-  FNumber: 0.001,
-  FocalLength: 0.01,
   ISO: 0.5,
+}
+
+/**
+ * Relative tolerance for rational tags. ExifTool stores ExposureTime / FNumber /
+ * FocalLength as fractions, so a JPEG write-back re-quantises them: 1/109 s
+ * (0.00917632) reads back as 0.009174311927. Comparing those with an absolute
+ * epsilon flags every correct export as a metadata mismatch.
+ */
+const RELATIVE_TOLERANCE: Record<string, number> = {
+  ExposureTime: 2e-3,
+  FNumber: 2e-3,
+  FocalLength: 2e-3,
+  GPSLatitude: 1e-7,
+  GPSLongitude: 1e-7,
+  GPSAltitude: 1e-3,
+  ISO: 1e-3,
+}
+
+/** Numeric equality for one preserved tag: absolute OR relative tolerance. */
+export function numericMatch(tag: string, a: number, b: number): boolean {
+  const diff = Math.abs(a - b)
+  if (diff <= (NUMERIC_TOLERANCE[tag] ?? 0)) return true
+  const rel = RELATIVE_TOLERANCE[tag]
+  if (rel === undefined) return diff === 0
+  return diff <= rel * Math.max(Math.abs(a), Math.abs(b), Number.MIN_VALUE)
 }
 
 function num(v: unknown): number | undefined {
@@ -264,7 +286,7 @@ export class MetadataService {
       } else {
         const na = num(a)
         const nb = num(b)
-        if (na !== undefined && nb !== undefined) ok = Math.abs(na - nb) <= (NUMERIC_TOLERANCE[tag] ?? 1e-9)
+        if (na !== undefined && nb !== undefined) ok = numericMatch(tag, na, nb)
         else ok = String(a).trim() === String(b).trim()
         if (!ok) mismatched.push({ tag, source: a, exported: b })
       }
