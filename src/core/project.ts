@@ -33,6 +33,8 @@ export interface ProjectOptions {
   previewEdge?: number
   analysisEdge?: number
   concurrency?: number
+  /** Detect extension-less photos by content while scanning (default true). */
+  sniffUnknown?: boolean
   grouping?: Partial<GroupingOptions>
   rawFallback?: RawFallbackRenderer
 }
@@ -137,6 +139,7 @@ export class Project {
       metadata: this.metadata,
       repo: this.repo,
       concurrency: this.options.concurrency ?? 6,
+      sniffUnknown: this.options.sniffUnknown,
       signal: opts.signal,
       onProgress: (p: ScanProgress) => opts.onProgress?.({ stage: `scan:${p.phase}`, done: p.done, total: p.total, message: p.current }),
     })

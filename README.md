@@ -123,7 +123,8 @@ Agent：photo_session_start({ ..., retouch: "generative" })
 ### 输入：路径或聊天附件
 
 - 目录路径：`photo_session_start({ path })` / `photo_workspace_open({ path })`，支持 `~` 和相对会话工作目录的路径。
-- 单张/多张文件：`files`，或直接把图片/文件贴进聊天后调用 `photo_session_start`；插件会把附件复制到 `stateRoot/inbox/` 的托管工作区，不改动原文件。
+- 单张/多张文件：`files`，或直接把图片/文件贴进聊天后调用 `photo_session_start`。插件会读取本会话的附件，按声明的 `mediaType` / 客户端文件名 / 文件头补齐扩展名（Host 的附件对象是按内容哈希命名、没有扩展名的），再复制到 `<会话工作区>/_chengying_inbox/session-*`；原文件不改动。
+- 附件是 Host 规范化后的副本：超过 4M 像素 / 4MB 的图会被缩放重编码，EXIF 可能丢失。要 RAW 或原始画质时请直接给照片目录路径。
 - 目录拖入聊天框仍受 DSH 附件 UI 限制；大目录请直接给路径。
 
 ### 交付：`photo_deliver`
@@ -144,11 +145,12 @@ Agent：photo_session_start({ ..., retouch: "generative" })
 |---|---|---|
 | `mode` | `auto` | `auto`：有 agent preset 时 Host 只挂 UI/runtime，工具由澄影预设提供；headless/无 preset 时自动 `both`。也可显式 `host` / `agent` / `both` |
 | `stateRoot` | `$CHENGYING_HOME` 或 `~/.chengying` | 数据库、预览、渲染、资产；必须在本机盘 |
-| `exportDir` | `<工作区>/_chengying_export` | 导出目录 |
+| `exportDir` | 目录工作区 `<工作区>/_chengying_export`；附件/文件工作区 `<会话工作区>/_chengying_export` | 导出目录 |
 | `allowedRoots` | `[]` | 非空时只允许打开这些根目录下的工作区 |
 | `vlm` | 启用 | 视觉大模型打分（提供者/模型、批大小、联系表单元尺寸、上限） |
 | `models` | `[]` | 专用打分模型 |
-| `intake` | `maxFiles: 200`、`maxBytes: 4 GiB` | 聊天附件/文件导入托管 inbox 的上限 |
+| `intake` | `maxFiles: 200`、`maxBytes: 4 GiB`、`location: workspace`、`dirName: _chengying_inbox` | 聊天附件的落点：`workspace` 放会话工作区（可见），`state` 放 `stateRoot/inbox`（旧行为） |
+| `scan` | `sniffUnknown: true` | 无扩展名文件按文件头识别为照片（Host 附件对象没有扩展名） |
 | `engines.{darktable,rawtherapee,builtin,ai}` | 全部启用 | `path` 可指定 CLI；未指定时自动查找 |
 | `defaultEngine` | `auto` | darktable → RawTherapee → 内置 |
 | `editing` | 并发 2、重试 3 | 子 Agent 提供者、预览尺寸、子 Agent 模型 |

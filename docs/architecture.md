@@ -50,7 +50,8 @@ DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会�
 
 ## 输入与交付
 
-- 聊天附件：Host 侧不写工作区；`photo_session_start` 读取当前会话最后一条带附件的人类消息，通过 `attachments.imageHostPath/fileHostPath` 找到只读路径，复制到 `stateRoot/inbox/` 后作为工作区打开。
+- 聊天附件：Host 的附件对象按内容哈希存储（`DSH_HOME/attachments/v1/objects/<xx>/<sha256>`，无扩展名）。`photo_session_start` 汇总本会话人类消息里的附件，通过 `attachments.imageHostPath/fileHostPath` 找到只读路径，按 `mediaType` / 客户端文件名 / 文件头（`src/core/image/format.ts`）补齐扩展名，复制到 `<会话工作区>/_chengying_inbox/session-*/` 后作为工作区打开；交付默认落在 `<会话工作区>/_chengying_export/`。无会话工作区时回退 `stateRoot/inbox/`，`intake.location: state` 可显式使用旧行为。
+- 扫描兜底：`scanner` 对没有已知扩展名的文件读取文件头，识别为图片时用检测到的 `ext` 入库（TIFF 容器再用 ExifTool `FileTypeExtension` 细分 RAW），因此历史遗留的无扩展名 inbox 也能被重新扫描。
 - `photo_deliver`：
   - `originals` 字节级复制入选原图；
   - `rendered` 走现有 exporter；

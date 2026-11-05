@@ -6,7 +6,7 @@
 import sharp from 'sharp'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, renameSync } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { basename, extname, join, resolve } from 'node:path'
 import type { Config } from './config.ts'
 import type { AgentLike, ApprovalService, AttachmentsService, FileAttachmentRef, HostContext, ImageAttachmentRef, JobsService, LlmService, SessionsService, ToolRunContext } from './host-types.ts'
 import type { ToolImage } from './tool.ts'
@@ -15,6 +15,7 @@ import { isInside } from '../core/fsguard.ts'
 import { ChengyingError, errorMessage } from '../core/util/errors.ts'
 import { chunk, newId, nowIso, round } from '../core/util/misc.ts'
 import { resolveUserPath } from '../core/util/path.ts'
+import { canonicalExtension, detectImageFormat, extensionForMediaType } from '../core/image/format.ts'
 import { readPlan, writePlan, type PlanStage, type SessionPlan } from './plan.ts'
 import { buildVlmPrompt, parseVlmResponse, type VlmItem } from '../core/analysis/vlm.ts'
 import { mergeDims } from '../core/select/selector.ts'
@@ -42,6 +43,19 @@ export interface Activity {
 }
 
 export type Log = { info(...a: unknown[]): void; warn(...a: unknown[]): void; error(...a: unknown[]): void }
+
+/** A chat attachment (or explicit file) handed to intake. */
+export interface IntakeSource {
+  /** Read-only host path of the stored object. */
+  path: string
+  /** Client-declared display name; the only place a pasted image keeps its extension. */
+  name?: string
+  /** Declared media type (`image/jpeg`), used when the stored object has no name. */
+  mediaType?: string
+  kind?: 'image' | 'file'
+  /** The Host normalised (downscaled/re-encoded) the image before storing it. */
+  downscaled?: boolean
+}
 
 export class ChengyingRuntime {
   /** HTTP router (set when the web server is mounted). */
@@ -76,6 +90,7 @@ export class ChengyingRuntime {
         exportDir: exportDir ?? this.config.exportDir,
         previewEdge: this.config.previewEdge,
         concurrency: this.config.analysisConcurrency,
+        sniffUnknown: this.config.scan.sniffUnknown,
       })
       this.projects.set(id, p)
     } else if (exportDir !== undefined) {
@@ -89,63 +104,129 @@ export class ChengyingRuntime {
 
   /**
    * Copy chat attachments or explicit files into a managed inbox and open it
-   * as a workspace. Originals stay untouched; the inbox is Chengying-owned.
+   * as a workspace. Originals stay untouched; the inbox lives inside the
+   * session workspace by default so the user can see what is being processed.
    */
-  importFiles(paths: string[], options: { agentId?: string; cwd?: string; exportDir?: string; name?: string } = {}): Project {
-    const files = paths.map(p => resolveUserPath(p, options.cwd)).filter(p => existsSync(p) && statSync(p).isFile())
-    if (files.length === 0) throw new ChengyingError('invalid-argument', 'no readable image/file attachments to import')
-    if (files.length > this.config.intake.maxFiles) throw new ChengyingError('invalid-argument', `too many files (${files.length} > intake.maxFiles ${this.config.intake.maxFiles})`)
-    const totalBytes = files.reduce((sum, p) => sum + statSync(p).size, 0)
+  async importFiles(sources: Array<string | IntakeSource>, options: { agentId?: string; cwd?: string; exportDir?: string; name?: string } = {}): Promise<Project> {
+    const prepared: Array<{ source: string; input: IntakeSource; fileName: string }> = []
+    for (const raw of sources) {
+      const input: IntakeSource = typeof raw === 'string' ? { path: raw } : raw
+      const source = resolveUserPath(input.path, options.cwd)
+      if (!existsSync(source) || !statSync(source).isFile()) continue
+      prepared.push({ source, input, fileName: await this.intakeFileName(source, input) })
+    }
+    if (prepared.length === 0) throw new ChengyingError('invalid-argument', 'no readable image/file attachments to import')
+    if (prepared.length > this.config.intake.maxFiles) throw new ChengyingError('invalid-argument', `too many files (${prepared.length} > intake.maxFiles ${this.config.intake.maxFiles})`)
+    const totalBytes = prepared.reduce((sum, p) => sum + statSync(p.source).size, 0)
     if (totalBytes > this.config.intake.maxBytes) throw new ChengyingError('invalid-argument', `attachments exceed intake.maxBytes (${totalBytes} > ${this.config.intake.maxBytes})`)
-    const digest = createHash('sha1').update(files.join('\0')).update(String(Date.now())).digest('hex').slice(0, 12)
-    const root = join(this.stateRoot(), 'inbox', options.name?.replace(/[^\w.-]+/g, '_') ?? `session-${digest}`)
+    const digest = createHash('sha1').update(prepared.map(p => p.source).join('\0')).update(String(Date.now())).digest('hex').slice(0, 12)
+    const base = this.intakeBase(options.cwd)
+    const root = join(base.dir, options.name?.replace(/[^\w.-]+/g, '_') ?? `session-${digest}`)
     mkdirSync(root, { recursive: true })
-    for (const source of files) {
-      let target = join(root, basename(source))
+    for (const { source, fileName } of prepared) {
+      let target = join(root, fileName)
       if (existsSync(target) && resolve(target) !== resolve(source)) {
-        const ext = target.slice(target.lastIndexOf('.'))
-        const base = target.slice(0, target.length - ext.length)
+        const ext = extname(fileName)
+        const stem = fileName.slice(0, fileName.length - ext.length)
         let index = 1
-        while (existsSync(`${base}_${index}${ext}`)) index++
-        target = `${base}_${index}${ext}`
+        while (existsSync(join(root, `${stem}_${index}${ext}`))) index++
+        target = join(root, `${stem}_${index}${ext}`)
       }
       if (resolve(target) === resolve(source)) continue
       copyFileSync(source, target)
       const stat = statSync(source)
       utimesSync(target, stat.atime, stat.mtime)
     }
-    return this.openProject(root, options.agentId, { exportDir: options.exportDir, cwd: options.cwd })
+    // Attachment intake defaults its delivery next to the session workspace,
+    // not inside the intake folder the user did not ask for.
+    const exportDir = options.exportDir ?? this.config.exportDir ?? (base.workspace === undefined ? undefined : join(base.workspace, '_chengying_export'))
+    return this.openProject(root, options.agentId, { exportDir, cwd: options.cwd })
   }
 
-  /** Latest direct human prompt in this session that carries image/file attachments. */
-  attachmentPaths(exec: ToolRunContext): string[] {
+  /** Where attachment copies go: the session workspace (default) or the state directory. */
+  private intakeBase(cwd: string | undefined): { dir: string; kind: 'workspace' | 'state'; workspace?: string } {
+    const location = this.config.intake.location ?? 'workspace'
+    if (location === 'workspace' && cwd !== undefined && cwd.trim() !== '') {
+      const workspace = resolve(cwd)
+      const allowed = this.config.allowedRoots.length === 0 || this.config.allowedRoots.some(root => isInside(workspace, resolve(root)))
+      if (allowed && existsSync(workspace) && statSync(workspace).isDirectory()) {
+        return { dir: join(workspace, this.config.intake.dirName ?? '_chengying_inbox'), kind: 'workspace', workspace }
+      }
+    }
+    return { dir: join(this.stateRoot(), 'inbox'), kind: 'state' }
+  }
+
+  /**
+   * Give an imported file a real extension. Host attachment objects are named
+   * by content hash (`<sha256>`, no extension), so the format comes from the
+   * declared media type, the client-declared name, or the bytes themselves.
+   */
+  private async intakeFileName(source: string, input: IntakeSource): Promise<string> {
+    const sourceName = basename(source)
+    if (canonicalExtension(extname(sourceName).slice(1)) !== undefined) return sourceName
+    const declared = input.name === undefined || input.name.trim() === '' ? undefined : basename(input.name)
+    const declaredExt = declared === undefined ? undefined : canonicalExtension(extname(declared).slice(1))
+    let ext = declaredExt ?? extensionForMediaType(input.mediaType)
+    if (ext === undefined) ext = (await detectImageFormat(source))?.ext
+    // Verbatim attachments (briefs, sidecars) keep the name the user attached;
+    // only images must end up with a real extension.
+    if (ext === undefined && input.kind !== 'image') return sourceName === '' ? 'file' : sourceName
+    if (ext === undefined) {
+      throw new ChengyingError('invalid-argument', `cannot determine the image format of ${source}; attach the original file (jpg/png/webp/gif) or pass the folder path`)
+    }
+    const stemSource = declared !== undefined && declaredExt !== undefined ? basename(declared, extname(declared)) : basename(sourceName, extname(sourceName))
+    return `${this.intakeStem(stemSource, source)}.${ext}`
+  }
+
+  private intakeStem(value: string, source: string): string {
+    let stem = value.replace(/[\u0000-\u001f<>:"/\\|?*]+/g, '_').replace(/^[.\s]+|[.\s]+$/g, '').trim()
+    // Content-addressed names are meaningless to the user; label them instead.
+    if (stem === '' || /^[0-9a-f]{32,}$/i.test(stem)) stem = `pasted-${createHash('sha1').update(source).digest('hex').slice(0, 8)}`
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(stem)) stem = `_${stem}`
+    return stem.slice(0, 120) || 'pasted'
+  }
+
+  /** Attachments from this session's human messages, in order and deduplicated. */
+  attachmentInputs(exec: ToolRunContext): IntakeSource[] {
     const sessions = this.ctx.get('sessions') as SessionsService | undefined
     const attachments = this.ctx.get('attachments') as AttachmentsService | undefined
     const sessionId = exec.agent?.session.id
     if (sessions === undefined || attachments === undefined || sessionId === undefined) return []
     const session = sessions.get(sessionId)
     if (session === undefined) return []
-    const messages = session.snapshotEvents().filter(event => event.type === 'user/message')
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const data = messages[index]?.data as { source?: { kind?: string }; content?: Array<Record<string, unknown>> } | undefined
+    const out: IntakeSource[] = []
+    const seen = new Set<string>()
+    for (const event of session.snapshotEvents()) {
+      if (event.type !== 'user/message') continue
+      const data = event.data as { source?: { kind?: string }; content?: Array<Record<string, unknown>> } | undefined
       if (data?.source?.kind !== 'user' || !Array.isArray(data.content)) continue
-      const paths: string[] = []
       for (const block of data.content) {
         try {
           if (block.type === 'image') {
-            const path = attachments.imageHostPath?.(block.attachment as ImageAttachmentRef)
-            if (path !== undefined) paths.push(path)
+            const ref = block.attachment as ImageAttachmentRef
+            const path = attachments.imageHostPath?.(ref)
+            if (path === undefined || seen.has(path)) continue
+            seen.add(path)
+            out.push({ path, name: ref.name, mediaType: ref.mediaType, kind: 'image', downscaled: ref.originalDimensions !== undefined })
           } else if (block.type === 'file') {
-            const path = attachments.fileHostPath?.(block.attachment as FileAttachmentRef)
-            if (path !== undefined) paths.push(path)
+            const ref = block.attachment as FileAttachmentRef
+            const path = attachments.fileHostPath?.(ref)
+            if (path === undefined || seen.has(path)) continue
+            seen.add(path)
+            out.push({ path, name: ref.name, kind: 'file' })
           }
         } catch (error) {
           this.log.warn('chengying: cannot resolve chat attachment path:', errorMessage(error))
         }
+        if (out.length >= this.config.intake.maxFiles) return out
       }
-      if (paths.length > 0) return paths
     }
-    return []
+    return out
+  }
+
+  /** Paths of this session's human-message attachments (compatibility helper). */
+  attachmentPaths(exec: ToolRunContext): string[] {
+    return this.attachmentInputs(exec).map(input => input.path)
   }
 
   planFor(project: Project, exec: ToolRunContext): SessionPlan | undefined {
