@@ -21,7 +21,7 @@ import { buildVlmPrompt, parseVlmResponse, type VlmItem } from '../core/analysis
 import { mergeDims } from '../core/select/selector.ts'
 import { EngineRegistry } from '../core/edit/registry.ts'
 import { EditService } from '../core/edit/service.ts'
-import type { EditStep } from '../core/types.ts'
+import type { EditStage, EditStep } from '../core/types.ts'
 import type { EditOrchestrator } from './orchestrator.ts'
 import type { Shot } from '../core/types.ts'
 
@@ -91,6 +91,7 @@ export class ChengyingRuntime {
         previewEdge: this.config.previewEdge,
         concurrency: this.config.analysisConcurrency,
         sniffUnknown: this.config.scan.sniffUnknown,
+        rawFallback: (source, dest, maxEdge) => this.developRawPreview(source, dest, maxEdge),
       })
       this.projects.set(id, p)
     } else if (exportDir !== undefined) {
@@ -312,6 +313,94 @@ export class ChengyingRuntime {
       maxParallel: Math.max(2, this.config.editing.maxConcurrent),
     })
     return this.registryInstance
+  }
+
+  /**
+   * Develop a RAW into a small JPEG for culling. libvips cannot decode CFA
+   * data and many phone DNGs carry no usable embedded preview, so without this
+   * the preview pipeline fails for the whole batch and analysis, photo_view and
+   * the original/final comparison all become unavailable. Returns false when no
+   * RAW-capable engine is installed, which makes the preview error explain the
+   * real cause instead of a libvips colourspace message.
+   */
+  async developRawPreview(source: string, dest: string, maxEdge: number, signal?: AbortSignal, requested?: string): Promise<boolean> {
+    const reg = this.engines()
+    let engineId: string
+    try {
+      engineId = await reg.pick('raw', requested)
+    } catch {
+      return false
+    }
+    if (engineId === 'builtin' || engineId === 'ai') return false
+    const engine = reg.get(engineId)
+    const scratchDir = join(this.stateRoot(), 'proxies', engineId)
+    mkdirSync(scratchDir, { recursive: true })
+    try {
+      const catalog = await reg.catalog(engineId, false, signal)
+      const stage: EditStage = { id: `stage_proxy_${engineId}`, engine: engineId, steps: [], options: {} }
+      const rendered = await engine.render({ input: source, inputKind: 'raw', stage, output: dest, format: 'jpeg', quality: 84, maxEdge, scratchDir, signal }, catalog)
+      return existsSync(rendered.output)
+    } catch (error) {
+      this.log.warn?.(`RAW preview via ${engineId} failed: ${errorMessage(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Which editing engines can actually work here. The session plan reports this
+   * up front so a RAW batch does not fail only after the first cull.
+   */
+  async enginePreflight(signal?: AbortSignal): Promise<{ raw: string[]; raster: string[]; rejected: string[] }> {
+    const reg = this.engines()
+    const ids = ['darktable', 'rawtherapee', 'builtin'].filter(id => reg.engines.has(id))
+    const raw: string[] = []
+    const raster: string[] = []
+    const rejected: string[] = []
+    for (const id of ids) {
+      const engine = reg.get(id)
+      const probe = await engine.probe()
+      if (!probe.available) {
+        if (id !== 'builtin') rejected.push(`${id}: ${probe.reason ?? 'not installed'}`)
+        continue
+      }
+      const health = await reg.health(id, { signal }).catch(error => ({ ok: false, catalog: 'failed' as const, render: 'skipped' as const, reason: errorMessage(error) }))
+      if (!health.ok) {
+        rejected.push(`${id}: ${health.reason ?? 'health check failed'}`)
+        continue
+      }
+      if (probe.inputs.raw) raw.push(id)
+      if (probe.inputs.raster) raster.push(id)
+    }
+    return { raw, raster, rejected }
+  }
+
+  /**
+   * A viewable preview for one shot without creating an editing task: reuse the
+   * cull preview, or develop a proxy through the installed RAW engine and adopt
+   * it as the shot preview so photo_view / compare / analysis all see it.
+   */
+  async proxyForShot(project: Project, shot: Shot, opts: { maxEdge?: number; engine?: string; signal?: AbortSignal } = {}): Promise<{ path: string; source: string }> {
+    if (shot.previewPath !== null && existsSync(shot.previewPath)) return { path: shot.previewPath, source: shot.previewSource ?? 'pipeline' }
+    const edge = opts.maxEdge ?? 1400
+    const dir = join(this.stateRoot(), 'proxies', project.id)
+    mkdirSync(dir, { recursive: true })
+    const dest = join(dir, `${shot.id}-${edge}.jpg`)
+    const thumb = join(dir, `${shot.id}-${edge}-thumb.jpg`)
+    if (!existsSync(dest)) {
+      // primaryFile is the RAW when the shot has one: the proxy is developed by
+      // the RAW engine, so there is no reason to fall back to a paired JPEG.
+      const file = project.repo.file(shot.primaryFile)
+      if (file === undefined) throw new ChengyingError('not-found', `no source file record for ${shot.id}; rescan the workspace`)
+      const ok = await this.developRawPreview(project.guard.readable(file.path), dest, edge, opts.signal, opts.engine)
+      if (!ok) {
+        throw new ChengyingError('engine-unavailable', `cannot render a preview for ${shot.id}: no usable RAW engine`, {
+          hint: 'install darktable or RawTherapee (or set engines.*.path), then retry; culling previews, photo_view and the original/final comparison all depend on it',
+        })
+      }
+    }
+    if (!existsSync(thumb)) await sharp(dest).resize({ width: 400, height: 400, fit: 'inside' }).jpeg({ quality: 80 }).toFile(thumb)
+    project.repo.updateShot(shot.id, { previewPath: dest, thumbPath: thumb, previewSource: 'engine', previewError: null })
+    return { path: dest, source: 'engine' }
   }
 
   edit(project: Project): EditService {

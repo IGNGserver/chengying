@@ -154,7 +154,11 @@ export async function makePreview(sourcePath: string, ext: string, orientation: 
       await rm(out, { force: true })
     }
   }
-  throw new ChengyingError('unsupported', `cannot build a preview for ${sourcePath}: ${errors.join('; ')}`, { sourcePath })
+  const raw = RAW_EXTENSIONS.has(lower)
+  const hint = raw
+    ? 'RAW files need a RAW engine for previews when libvips cannot decode the CFA data and the file carries no usable embedded JPEG: install darktable or RawTherapee (or set engines.*.path). Chengying uses the installed engine automatically, so the batch stays usable once one is present.'
+    : 'libvips cannot decode this file; convert it to JPEG/TIFF/PNG or add a supported engine.'
+  throw new ChengyingError('unsupported', `cannot build a preview for ${sourcePath}: ${errors.join('; ')}`, { sourcePath, raw, hint })
 }
 
 /** Decode any preview-able image to a small RGB buffer for analysis. */

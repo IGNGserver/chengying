@@ -10,7 +10,7 @@ export const cliExtensions: CliExtension[] = []
 /* engines: list / verify (interface coverage report) */
 cliExtensions.push({
   name: 'engines',
-  usage: 'engines [list | verify <engine> [--input <file>] [--report <file>] [--only op1,op2]]',
+  usage: 'engines [list | doctor | preview <file> | verify <engine> [--input <file>] [--report <file>] [--only op1,op2]]',
   async run(pos, opts) {
     const { EngineRegistry } = await import('./core/edit/registry.ts')
     const { verifyEngine, writeReport } = await import('./core/edit/verify.ts')
@@ -34,6 +34,38 @@ cliExtensions.push({
           out.push({ ...p, operations: c.coverage.operations, parameters: c.coverage.parameters, source: c.source, extensions: c.coverage.extensions, unsupported: c.coverage.unsupported })
         }
         opts.out(out)
+        return 0
+      }
+      if (args[0] === 'doctor') {
+        // "Is this engine installed" is not the same question as "can it edit
+        // here": doctor discovers the catalog and renders a throw-away image
+        // through the real command line, which is what catches Windows path
+        // escaping and broken installs.
+        const probes = await registry.probeAll(true)
+        const out: unknown[] = []
+        let failures = 0
+        for (const p of probes) {
+          if (p.id === 'ai') continue
+          const health = await registry.health(p.id, { refresh: true })
+          if (!health.ok) failures++
+          out.push({ id: p.id, available: p.available, version: p.version, inputs: p.inputs, health })
+        }
+        opts.out({ engines: out, ok: failures === 0 })
+        return failures === 0 ? 0 : 3
+      }
+      if (args[0] === 'preview') {
+        // Neutral develop of one file through an engine — the same render the
+        // preview pipeline uses for RAW shots, without opening a project.
+        const file = args[1] ?? input
+        if (file === undefined) throw new Error('usage: engines preview <file> [--out <jpg>] [--edge 1400] [--engine darktable]')
+        const engineFlag = flag('--engine')
+        const outPath = flag('--out') ?? join(state, 'preview.jpg')
+        const edge = Number(flag('--edge') ?? 1400)
+        const id = engineFlag ?? await registry.pick(/\.(nef|cr2|cr3|arw|raf|rw2|orf|dng|pef|srw)$/i.test(file) ? 'raw' : 'raster')
+        const catalog = await registry.catalog(id)
+        const stage: import('./core/types.ts').EditStage = { id: 'stage_preview', engine: id, steps: [] }
+        const rendered = await registry.get(id).render({ input: resolve(file), inputKind: /\.(nef|cr2|cr3|arw|raf|rw2|orf|dng|pef|srw)$/i.test(file) ? 'raw' : 'raster', stage, output: resolve(outPath), format: 'jpeg', quality: 84, maxEdge: edge, scratchDir: join(state, 'preview-scratch') }, catalog)
+        opts.out({ engine: id, output: rendered.output, width: rendered.width, height: rendered.height, durationMs: rendered.durationMs, warnings: rendered.warnings })
         return 0
       }
       if (args[0] === 'verify') {

@@ -110,11 +110,34 @@ export interface RenderResult {
 
 export interface ValidatedStep { step: EditStep; warnings: string[] }
 
+/**
+ * Result of actually using an engine, not merely finding its binary.
+ * `probe()` answers "is it installed"; this answers "does it work here".
+ */
+export interface EngineHealth {
+  ok: boolean
+  /** Catalog discovery succeeded (module/section dump parsed). */
+  catalog: 'ok' | 'failed'
+  /** A throw-away render through the real CLI succeeded. */
+  render: 'ok' | 'failed' | 'skipped'
+  reason?: string
+  durationMs?: number
+}
+
+export interface SmokeResult { ok: boolean; reason?: string; skipped?: boolean }
+
 export interface EngineAdapter {
   readonly id: string
   readonly title: string
   probe(force?: boolean): Promise<EngineProbe>
   catalog(options?: { refresh?: boolean; signal?: AbortSignal }): Promise<Catalog>
+  /**
+   * Render a tiny synthetic image through the real command line. Engines whose
+   * CLI can be present but broken (darktable-cli on Windows mangles output
+   * paths) report that here so `pick()` can fall through to a working engine
+   * instead of failing on the first photo.
+   */
+  smokeTest?(signal?: AbortSignal): Promise<SmokeResult>
   /** Validate/normalise one step against the catalog. */
   validateStep(step: EditStep, catalog: Catalog): ValidatedStep
   validateStageOptions?(options: Record<string, unknown> | undefined, catalog: Catalog): { options: Record<string, unknown>; warnings: string[] }

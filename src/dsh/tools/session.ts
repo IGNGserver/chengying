@@ -93,11 +93,22 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         if (source.startsWith('attachments:') || source.startsWith('files:')) {
           notes.push(`照片副本在处理工作区 ${project.root}；成品默认交付到 ${plan.outputDir}`)
         }
+        // Preflight the engines now instead of discovering after a 10 s scan
+        // that a RAW batch has no usable decoder: the plan names the engine
+        // that will develop RAW, or says plainly that previews/retouching will
+        // not work and why.
+        const preflight = await rt.enginePreflight(exec.signal)
+        if (plan.retouch !== 'none' || plan.goal === 'retouch-deliver') {
+          if (preflight.raw.length === 0) {
+            notes.push(`未检测到可用的 RAW 引擎（${preflight.rejected.join('; ') || 'darktable/RawTherapee 均未安装'}）；RAW 照片将无法生成预览或修图，JPG/PNG 不受影响`)
+          }
+        }
         return {
           plan,
           project: project.summary(),
           workspace: project.root,
           deliveryDir: plan.outputDir,
+          engines: preflight,
           notes,
           next: plan.goal === 'cull'
             ? 'Call photo_cull_run, then photo_select; deliver with photo_deliver (originals).'

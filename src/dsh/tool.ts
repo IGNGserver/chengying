@@ -83,8 +83,13 @@ export function defineTool<A>(spec: ToolSpec<A>): ToolDefinition {
         return toJson(await spec.run((args ?? {}) as A, exec))
       } catch (error) {
         if (isChengyingError(error)) {
-          const details = error.details === undefined ? '' : ` ${JSON.stringify(error.details).slice(0, 800)}`
-          throw new Error(`[${error.code}] ${error.message}${details}`, { cause: error })
+          // `hint` is written for the agent, not for a log file: keep it in the
+          // message so the next step is actionable, and leave only machine
+          // fields in the trailing JSON.
+          const { hint, ...rest } = (error.details ?? {}) as Record<string, unknown>
+          const hintText = typeof hint === 'string' && hint !== '' ? `\nHint: ${hint}` : ''
+          const details = Object.keys(rest).length === 0 ? '' : ` ${JSON.stringify(rest).slice(0, 600)}`
+          throw new Error(`[${error.code}] ${error.message}${details}${hintText}`, { cause: error })
         }
         throw new Error(errorMessage(error), { cause: error })
       }

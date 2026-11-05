@@ -4,13 +4,28 @@
 
 ## 发现方式
 
+darktable 的发现顺序是 **darktable-mcp（5.7+）→ 随包发布的目录快照 → 原生探测**。快照按精确版本匹配，缺省时降级到同 `major.minor` 的快照并加提示；原生探测（`native/dt-introspect.c`）依赖 `dlopen` 与 `fork`，只在 POSIX 上启用。这个顺序是 0.4.2 调整的：之前"原生优先"，装了 darktable 的 Windows 机器每次刷新都先尝试编译一个必然失败的 C 程序，5.6.2 又因为对不上 5.6.1 的快照而彻底不可用。
+
 | 引擎 | 来源 | 得到的信息 |
 |---|---|---|
 | darktable | `native/dt-introspect.c`：在 fork 出的子进程里 dlopen `lib/darktable/plugins/*.so`，调用每个模块的 introspection API（v8） | 模块名/版本/分组/标志、参数结构体完整字段树（float/int/bool/enum/数组/嵌套结构/联合）、范围、默认值、枚举值与标签、默认混合色彩空间；全局混合参数版本与各管线顺序版本 |
 | darktable 5.7+ | 可选 darktable-mcp | 同上（MCP `tools/list` + 编解码工具），并暴露原生工具给 `edit_native` |
+| darktable（快照） | `catalogs/darktable-<version>.json` | 与原生探测同构的模块/参数树与管线顺序；版本不完全一致时只降级到同 minor |
 | RawTherapee | `rawtherapee-cli -O` 导出完整处理配置；带 `Name_0` 的 Locallab sidecar 导出全部局部调整点键 | 全部节（工具）与键、默认值与类型；结合源码提炼的范围/枚举提示 |
 | 内置 | 操作注册表 | 每个操作的完整 Schema |
 | AI | 注册表 + 配置的模型/命令/提供者 | 内置操作与 `aiOperations` 中每个外部命令的 Schema |
+
+### 可用性（`health`）与平台矩阵
+
+`edit_engines` 的 `available` 现在等于"真的能用"：除了 `probe()`（找到可执行文件 + 版本），还会建一次目录并渲染一张 48×32 的图（`smokeTest`）。渲染失败或目录发现失败的引擎不参与 `auto` 选择，`edit_engines` 会给出 `health.catalog` / `health.render` / `health.reason`。这条是 Windows 上暴露出来的：`probe()` 认为 darktable 可用，但每次渲染都因为输出路径被转义而失败，`auto` 于是每次都选中它。
+
+| 平台 | darktable 模块发现 | 渲染 | RawTherapee |
+|---|---|---|---|
+| macOS | MCP / 快照 / 原生探测 | 可用 | 可用 |
+| Linux | MCP / 快照 / 原生探测 | 可用 | 可用 |
+| Windows | MCP（5.7+）/ 快照 | 可用（路径统一走 `cliPath()`） | 可用 |
+
+Windows 的已知边界：`native/dt-introspect.c` 不适用（无 `dlopen`/`fork`）；既没有快照也没有 darktable-mcp 的版本会明确报错并给出可行路径，而不是抛 C 编译错误。`--outdir` 在 darktable 5.6.1 上不写文件，因此不使用它；输出路径改由 `cliPath()` 转成 `C:/…` 形式（已在 Windows VM 实测：`C:\…\out\a.jpg` 会被写成 `C:…outa.jpg`，`C:/…/out/b.jpg` 正常落盘）。
 
 ## 验证方法（`chengying engines verify <engine>`）
 

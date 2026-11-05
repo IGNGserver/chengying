@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { copyFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ChengyingRuntime } from '../src/dsh/runtime.ts'
 import { resolveConfig } from '../src/dsh/config.ts'
 import { sessionTools } from '../src/dsh/tools/session.ts'
@@ -59,8 +59,9 @@ describe('session plan and intake', () => {
   it('expands ~ and relative paths against the session cwd', () => {
     expect(resolveUserPath('~')).toBe(homedir())
     expect(resolveUserPath('~/photos', '/tmp')).toBe(join(homedir(), 'photos'))
-    expect(resolveUserPath('shots', '/tmp/work')).toBe('/tmp/work/shots')
-    expect(resolveUserPath('"shots"', '/tmp/work')).toBe('/tmp/work/shots')
+    // Build the expectation with node:path so the assertion holds on Windows too.
+    expect(resolveUserPath('shots', '/tmp/work')).toBe(resolve('/tmp/work', 'shots'))
+    expect(resolveUserPath('"shots"', '/tmp/work')).toBe(resolve('/tmp/work', 'shots'))
   })
 
   it('infers cull-only vs full delivery from natural language', () => {
