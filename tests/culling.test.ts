@@ -163,5 +163,13 @@ describe('natural-language selection requests', () => {
     expect(parseSelectionRequest('不限数量，质量80分以上的都要，不要自拍')).toMatchObject({ minScore: 80, avoidTags: ['selfie'] })
     expect(parseSelectionRequest('select 12 photos with people, vertical')).toMatchObject({ count: 12, orientation: 'portrait', preferTags: ['people'] })
     expect(parseSelectionRequest('所有合格的照片').count).toBeUndefined()
+    // 5-point / star scale and non-quantity quantifier exclusions + clause-level negation
+    expect(parseSelectionRequest('4分以上全要')).toMatchObject({ minScore: 72 })
+    expect(parseSelectionRequest('4星以上')).toMatchObject({ minScore: 72 })
+    expect(parseSelectionRequest('同一张场景只留最好的，挑5张')).toMatchObject({ count: 5 })
+    expect(parseSelectionRequest('不要拍得太乱的街拍和美食，多留人像')).toMatchObject({
+      preferTags: ['people'],
+      avoidTags: expect.arrayContaining(['street', 'food']),
+    })
   })
 })

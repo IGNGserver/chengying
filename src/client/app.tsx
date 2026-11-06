@@ -29,7 +29,7 @@ const T: Record<Lang, Record<string, string>> = {
     groups: '分组', duplicates: '近似重复组', scenes: '场景', segments: '行程段落', detail: '详情', close: '关闭', error: '错误',
     runCull: '自动筛图（扫描·预览·评分·分组）', rerunCull: '强制重算', lang: 'EN', emptyTasks: '暂无修图任务。在对话中让 Agent 对选片创建修图任务（edit_tasks_create）。', emptyExports: '暂无导出。',
     minScore: '最低分', viewMode: '视图', gridView: '全部照片', nearGroups: '近似重复/连拍组对比', sceneGroups: '同场景组对比', zoom: '放大对比', estCost: '估算费用', avgDuration: '平均耗时', unchanged: '原片直出',
-    plan: '当前会话计划', goal: '范围', retouchMode: '修图方式', cullQuality: '筛图质量', outputDir: '交付目录', deliverMode: '交付物', stage: '阶段', checkpoint: '选片确认',
+    plan: '当前会话计划', goal: '范围', retouchMode: '修图方式', cullQuality: '筛图质量', outputDir: '交付目录', deliverMode: '交付物', stage: '阶段', checkpoint: '选片确认', approveSelection: '确认选片（允许修图）', approved: '已确认选片', cacheRead: '缓存命中',
   },
   en: {
     overview: 'Overview', photos: 'Photos', selection: 'Selection', tasks: 'Retouch tasks', exports: 'Exports', logs: 'Logs & usage',
@@ -46,7 +46,7 @@ const T: Record<Lang, Record<string, string>> = {
     groups: 'Groups', duplicates: 'Near-duplicate groups', scenes: 'Scenes', segments: 'Trip segments', detail: 'Detail', close: 'Close', error: 'Error',
     runCull: 'Run culling (scan · previews · scores · groups)', rerunCull: 'Recompute', lang: '中', emptyTasks: 'No retouch tasks yet. Ask the agent to create them for a selection (edit_tasks_create).', emptyExports: 'No exports yet.',
     minScore: 'Min score', viewMode: 'View', gridView: 'All photos', nearGroups: 'Near-duplicate bursts', sceneGroups: 'Scene groups', zoom: 'Fullscreen compare', estCost: 'Est. cost', avgDuration: 'Avg time', unchanged: 'Unchanged',
-    plan: 'Session plan', goal: 'Goal', retouchMode: 'Retouch', cullQuality: 'Cull quality', outputDir: 'Delivery directory', deliverMode: 'Deliverable', stage: 'Stage', checkpoint: 'Selection checkpoint',
+    plan: 'Session plan', goal: 'Goal', retouchMode: 'Retouch', cullQuality: 'Cull quality', outputDir: 'Delivery directory', deliverMode: 'Deliverable', stage: 'Stage', checkpoint: 'Selection checkpoint', approveSelection: 'Approve selection', approved: 'Selection approved', cacheRead: 'Cache read',
   },
 }
 
@@ -315,6 +315,7 @@ function Selection({ pid, t }: { pid: string; t: Record<string, string> }): Reac
   const [sel, setSel] = useState<string>()
   const [request, setRequest] = useState('')
   const [busy, setBusy] = useState(false)
+  const [approved, setApproved] = useState(false)
   const [err, setErr] = useState<string>()
   const active = sel ?? sels.data?.selections[0]?.id
   const rows = usePoll(() => active === undefined ? Promise.resolve({ total: 0, shots: [] as ShotRow[] }) : api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?selection=${active}&only=all&limit=500&sort=time`), [pid, active], 6000)
@@ -324,6 +325,12 @@ function Selection({ pid, t }: { pid: string; t: Record<string, string> }): Reac
     if (active === undefined) return
     await api(`/p/${pid}/selection/${active}/adjust`, { method: 'POST', body })
     rows.reload()
+  }
+  const approve = async (): Promise<void> => {
+    try {
+      await api(`/p/${pid}/plan/approve-selection`, { method: 'POST' })
+      setApproved(true)
+    } catch (e) { setErr((e as Error).message) }
   }
   const run = async (): Promise<void> => {
     setBusy(true); setErr(undefined)
@@ -344,6 +351,7 @@ function Selection({ pid, t }: { pid: string; t: Record<string, string> }): Reac
         <select className="cy-select" value={active ?? ''} onChange={e => setSel(e.target.value)}>
           {(sels.data?.selections ?? []).map(s => <option key={s.id} value={s.id}>{s.name} · {s.count}</option>)}
         </select>
+        {cur && <button className="cy-btn cy-ghost" disabled={approved} onClick={() => void approve()}>{approved ? t.approved : t.approveSelection}</button>}
         {cur && <span className="cy-muted cy-small">{String(cur.stats.mode ?? '')} · {String(cur.stats.selected ?? '')}/{String(cur.stats.totalShots ?? '')} · ⌀{String(cur.stats.meanScore ?? '')} · {String(cur.stats.segmentsCovered ?? '')}/{String(cur.stats.segmentsTotal ?? '')} {t.segments}</span>}
       </div>
       <div className="cy-list">
@@ -522,8 +530,9 @@ function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.
 function Logs({ pid, s, t }: { pid: string; s: Summary; t: Record<string, string> }): React.ReactElement {
   const ev = usePoll(() => api<{ events: EventInfo[] }>(`/p/${pid}/events?limit=300`), [pid], 4000)
   const tasks = usePoll(() => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks`).catch(() => ({ tasks: [] as TaskInfo[] })), [pid], 6000)
-  const totals = s.usage.reduce((a, u) => ({ calls: a.calls + u.calls, i: a.i + u.inputTokens, o: a.o + u.outputTokens, im: a.im + u.images }), { calls: 0, i: 0, o: 0, im: 0 })
-  const estUsd = ((totals.i * 1.0 + totals.o * 4.0) / 1_000_000).toFixed(4)
+  const totals = s.usage.reduce((a, u) => ({ calls: a.calls + u.calls, i: a.i + u.inputTokens, o: a.o + u.outputTokens, cr: a.cr + (u.cacheReadTokens ?? 0), im: a.im + u.images }), { calls: 0, i: 0, o: 0, cr: 0, im: 0 })
+  const billableIn = Math.max(0, totals.i - totals.cr)
+  const estUsd = ((billableIn * 1.0 + totals.cr * 0.1 + totals.o * 4.0) / 1_000_000).toFixed(4)
   const durations = (tasks.data?.tasks ?? [])
     .filter(x => x.startedAt && x.finishedAt)
     .map(x => Math.max(0, (Date.parse(x.finishedAt as string) - Date.parse(x.startedAt as string)) / 1000))
@@ -532,7 +541,7 @@ function Logs({ pid, s, t }: { pid: string; s: Summary; t: Record<string, string
     <div>
       <h4>{t.usage}</h4>
       <div className="cy-small cy-muted" style={{ marginBottom: 6 }}>
-        {t.estCost}: ~${estUsd} · {t.avgDuration}: {avgSec}s ({durations.length})
+        {t.estCost}: ~${estUsd} ({t.cacheRead}: {totals.cr}) · {t.avgDuration}: {avgSec}s ({durations.length})
       </div>
       <table className="cy-table">
         <thead><tr><th /><th>{t.calls}</th><th>{t.tokensIn}</th><th>{t.tokensOut}</th><th>{t.images}</th></tr></thead>

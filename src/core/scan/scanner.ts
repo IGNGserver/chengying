@@ -74,7 +74,7 @@ async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boo
         stats.seen++
         const ext = extname(e.name).slice(1).toLowerCase()
         if (RAW_EXTENSIONS.has(ext) || RASTER_EXTENSIONS.has(ext)) out.push({ path: p, ext })
-        else if (sniffUnknown) out.push({ path: p, ext: '' })
+        else if (sniffUnknown && ext === '') out.push({ path: p, ext: '' })
       }
     }
   }
@@ -135,10 +135,13 @@ function localDay(local: string | undefined): string | null {
   return local !== undefined && /^\d{4}-\d{2}-\d{2}/.test(local) ? local.slice(0, 10) : null
 }
 
-function captureTs(f: FileRecord): number | null {
+function captureTs(f: FileRecord, fallbackTzOffset?: string): number | null {
   if (f.meta.captureTimeUtc !== undefined) return Date.parse(f.meta.captureTimeUtc) / 1000
   if (f.meta.captureTime !== undefined) {
-    const t = Date.parse(`${f.meta.captureTime}Z`)
+    const zone = f.meta.tzOffset !== undefined && /^[+-]\d{2}:\d{2}$/.test(f.meta.tzOffset)
+      ? f.meta.tzOffset
+      : (fallbackTzOffset !== undefined && /^[+-]\d{2}:\d{2}$/.test(fallbackTzOffset) ? fallbackTzOffset : 'Z')
+    const t = Date.parse(`${f.meta.captureTime}${zone}`)
     return Number.isNaN(t) ? null : t / 1000
   }
   return f.mtimeMs / 1000
@@ -269,6 +272,19 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
 
   let pairs = 0
   const shotIds = new Set<string>()
+  // When mixing phone photos (with OffsetTimeOriginal) and camera photos (without timezone offset)
+  // in the same workspace, infer the workspace/day timezone offset so camera timestamps are not
+  // misinterpreted as UTC 'Z' (which would shift them by e.g. 8 hours and break scene/segment grouping).
+  const tzByDay = new Map<string, string>()
+  let workspaceTz: string | undefined
+  for (const f of files) {
+    const tz = f.meta.tzOffset
+    if (tz !== undefined && /^[+-]\d{2}:\d{2}$/.test(tz)) {
+      workspaceTz ??= tz
+      const d = localDay(f.meta.captureTime)
+      if (d !== null && !tzByDay.has(d)) tzByDay.set(d, tz)
+    }
+  }
   repo.db.tx(() => {
     for (const e of shots.values()) {
       // Prefer a JPEG as the display raster when several rasters share a base name.
@@ -280,6 +296,8 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       const id = shotIdFor(primary.path)
       shotIds.add(id)
       const metaSrc = primary.meta.captureTime !== undefined ? primary : (raster ?? primary)
+      const day = localDay(metaSrc.meta.captureTime)
+      const fallbackTz = raster?.meta.tzOffset ?? (day !== null ? tzByDay.get(day) : undefined) ?? workspaceTz
       const prev = repo.shot(id)
       const shot: Shot = {
         id,
@@ -287,9 +305,9 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         rawFile: raw?.id ?? null,
         rasterFile: raster?.id ?? null,
         captureTime: metaSrc.meta.captureTime ?? null,
-        captureTs: captureTs(metaSrc),
-        tzOffset: metaSrc.meta.tzOffset ?? null,
-        day: localDay(metaSrc.meta.captureTime),
+        captureTs: captureTs(metaSrc, fallbackTz),
+        tzOffset: metaSrc.meta.tzOffset ?? fallbackTz ?? null,
+        day,
         gps: primary.meta.gps ?? raster?.meta.gps ?? null,
         camera: metaSrc.meta.camera ?? null,
         lens: metaSrc.meta.lens ?? null,

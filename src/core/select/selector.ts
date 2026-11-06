@@ -47,12 +47,12 @@ export function mergeDims(scores: Record<string, ScoreSet>, profile?: Preference
   const tags = [...new Set([...(heur.tags ?? []), ...learned.flatMap(s => s.tags ?? []), ...judged.flatMap(s => s.tags ?? [])])]
   const issues = [...new Set([...(scores.technical?.issues ?? []), ...(scores.aesthetic?.issues ?? []), ...judged.flatMap(s => s.issues ?? [])])]
   const dims: ShotDims = {
-    technical: weightedAvg([[scores.technical?.technical, 2], [avgOf(learned, 'technical'), 1], [avgOf(judged, 'technical'), 1]]),
+    technical: weightedAvg([[scores.technical?.technical, 3], [avgOf(learned, 'technical'), 1.5], [avgOf(judged, 'technical'), 1]]),
     aesthetic: weightedAvg([[scores.aesthetic?.aesthetic, 1], [avgOf(learned, 'aesthetic'), 2], [avgOf(judged, 'aesthetic'), 2.5]]),
     composition: weightedAvg([[scores.aesthetic?.composition, 1], [avgOf(judged, 'composition'), 2]]),
     content: weightedAvg([[avgOf(learned, 'content'), 1], [avgOf(judged, 'content'), 2]]),
     story: avgOf(judged, 'story'),
-    potential: weightedAvg([[scores.technical?.potential ?? scores.aesthetic?.potential ?? scores.potential?.potential, 1], [avgOf(judged, 'potential'), 1]]),
+    potential: weightedAvg([[scores.technical?.potential ?? scores.aesthetic?.potential ?? scores.potential?.potential, 1.5], [avgOf(judged, 'potential'), 1]]),
     tags,
     issues,
     sources: Object.keys(scores),
@@ -136,8 +136,23 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
     if (preferHits.length > 0) { fused += Math.min(16, 8 * preferHits.length); reasonBits.push(`matches ${preferHits.slice(0, 3).join('/')}`) }
     if (avoidHits.length > 0) { fused -= 20; reasonBits.push(`avoid ${avoidHits.slice(0, 2).join('/')}`) }
     if (shot.userRating !== null && shot.userRating > 0) fused += (shot.userRating - 3) * 4
-    if (dims.issues.includes('eyes-closed')) { fused -= 18; reasonBits.push('eyes-closed') }
-    if (dims.issues.includes('subject-out-of-focus')) { fused -= 12; reasonBits.push('subject-soft') }
+    // Heuristic technicalScore and potentialScore already deduct for suspected closed eyes
+    // and soft subjects. Only apply an additional fused penalty when a VLM/agent/user source
+    // explicitly confirmed the issue, avoiding a triple penalty on heuristic false positives.
+    const shotScores = input.scores.get(shot.id) ?? {}
+    const confirmedIssues = new Set(
+      Object.entries(shotScores)
+        .filter(([k]) => k.startsWith('vlm:') || k === 'agent' || k === 'user')
+        .flatMap(([, v]) => v.issues ?? []),
+    )
+    if (dims.issues.includes('eyes-closed')) {
+      if (confirmedIssues.has('eyes-closed')) fused -= 14
+      reasonBits.push('eyes-closed')
+    }
+    if (dims.issues.includes('subject-out-of-focus')) {
+      if (confirmedIssues.has('subject-out-of-focus')) fused -= 10
+      reasonBits.push('subject-soft')
+    }
     if (dims.issues.includes('out-of-focus') || dims.issues.includes('motion-blur')) reasonBits.push('soft')
     cands.set(shot.id, { shot, dims, fused: clamp(fused, 0, 100), scene: sceneOf.get(shot.id), segment: segmentOf.get(shot.id), reasonBits })
   }

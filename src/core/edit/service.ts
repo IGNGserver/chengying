@@ -30,6 +30,7 @@ export type EditOp =
   | { op: 'set_stage_options'; stage: string | number; options: Record<string, unknown> }
   | { op: 'set_source'; source: 'raw' | 'raster' }
   | { op: 'import_recipe'; stage?: string | number; text?: string; path?: string; format?: string; replace?: boolean }
+  | { op: 'copy_from_task'; task_id: string; include_masks?: boolean; include_geometry?: boolean; replace?: boolean }
   | { op: 'reset'; stage?: string | number }
   | { op: 'set_provenance'; generative?: boolean; authorization?: string; note?: string }
 
@@ -308,6 +309,33 @@ export class EditService {
           summary.push(`import ${imported.steps.length} steps`)
           break
         }
+        case 'copy_from_task': {
+          const srcRev = this.head(o.task_id)
+          const GEOM_OPS = new Set(['crop', 'rotate', 'perspective', 'flip', 'ashift', 'Crop', 'Rotation', 'Perspective', 'Distortion', 'Framing'])
+          let copiedCount = 0
+          for (const srcStage of srcRev.doc.stages) {
+            const eligible = srcStage.steps.filter(st => {
+              if (!st.enabled) return false
+              if (st.op.startsWith('gen_')) return false
+              if (o.include_masks !== true && st.mask !== undefined) return false
+              if (o.include_geometry !== true && GEOM_OPS.has(st.op)) return false
+              return true
+            })
+            if (eligible.length === 0) continue
+            let dstStage = doc.stages.find(s => s.engine === srcStage.engine)
+            if (dstStage === undefined) {
+              const probe = await this.engines.get(srcStage.engine).probe()
+              if (!probe.available || (doc.stages.length > 0 && !probe.inputs.raster)) continue
+              dstStage = { id: newId('stage'), engine: srcStage.engine, steps: [], ...(srcStage.options ? { options: structuredClone(srcStage.options) } : {}) }
+              doc.stages.push(dstStage)
+            }
+            const cloned = eligible.map(st => ({ ...structuredClone(st), id: newId('st') }))
+            dstStage.steps = o.replace === true ? cloned : [...dstStage.steps, ...cloned]
+            copiedCount += cloned.length
+          }
+          summary.push(`copy ${copiedCount} step(s) from ${o.task_id}`)
+          break
+        }
         case 'set_provenance': {
           const pv = doc.provenance ?? {}
           if (o.generative !== undefined) pv.generative = o.generative
@@ -475,12 +503,20 @@ export class EditService {
       leftLabel = `rev ${this.project.repo.revision(opts.againstRevisionId)?.seq ?? ''}`
     } else {
       const shot = this.project.repo.shot(task.shotId) as Shot
-      if (shot.previewPath === null) {
-        // RAW without a libvips preview (CFA data, no embedded JPEG): develop
-        // the untouched source through the task's engine so the comparison
-        // still shows original | edited.
-        leftPath = await this.renderOriginal(taskId, { maxEdge: edge, signal: opts.signal })
-        leftLabel = 'original (developed)'
+      const head = this.head(taskId)
+      const srcFile = this.project.repo.file(head.doc.sourceFile)
+      const firstEngine = head.doc.stages[0]?.engine
+      if (shot.previewPath === null || (srcFile?.kind === 'raw' && firstEngine !== undefined && firstEngine !== 'builtin' && firstEngine !== 'ai')) {
+        // RAW edited by a RAW engine (or RAW without a libvips preview): develop
+        // the untouched source through the task's engine so the comparison shows
+        // the true engine baseline vs. edited.
+        try {
+          leftPath = await this.renderOriginal(taskId, { maxEdge: edge, signal: opts.signal })
+          leftLabel = 'original (developed)'
+        } catch {
+          if (shot.previewPath === null) throw new ChengyingError('not-found', `no preview for ${shot.id}`)
+          leftPath = shot.previewPath
+        }
       } else {
         leftPath = shot.previewPath
       }
@@ -554,14 +590,62 @@ export class EditService {
     try {
       const img = await loadImage(base.path)
       let maskPath: string | undefined
+      let rawMask: Float32Array | undefined
       if (opts.mask !== undefined) {
         maskPath = join(scratch, 'mask.png')
-        await writeMaskPng(rasterizeMask({ ...opts.mask, opacity: 1 }, img), img.width, img.height, maskPath)
+        rawMask = rasterizeMask({ ...opts.mask, opacity: 1 }, img)
+        await writeMaskPng(rawMask, img.width, img.height, maskPath)
       }
-      const out = await generateWith(opts.provider, { image: base.path, mask: maskPath, prompt: opts.prompt, kind: opts.kind, width: img.width, height: img.height, outDir: scratch, signal: opts.signal })
-      // Normalise to the render size so the layer registers with the photo.
+      // Localized crop-and-stitch: when a mask covers a small region (<45% of the image)
+      // for remove/fill/replace, crop around the mask with generous context so the provider
+      // generates high-density pixels for that region instead of downscaling the whole image.
+      let cropBox: { left: number; top: number; width: number; height: number } | undefined
+      if (rawMask !== undefined && ['remove', 'fill', 'replace'].includes(opts.kind)) {
+        let minX = img.width; let minY = img.height; let maxX = -1; let maxY = -1
+        for (let y = 0; y < img.height; y++) {
+          for (let x = 0; x < img.width; x++) {
+            if ((rawMask[y * img.width + x] as number) > 0.02) {
+              if (x < minX) minX = x; if (x > maxX) maxX = x
+              if (y < minY) minY = y; if (y > maxY) maxY = y
+            }
+          }
+        }
+        if (maxX >= minX && maxY >= minY) {
+          const pad = Math.max(32, Math.round(Math.max(maxX - minX + 1, maxY - minY + 1) * 0.5))
+          const left = Math.max(0, minX - pad)
+          const top = Math.max(0, minY - pad)
+          const width = Math.min(img.width - left, maxX - left + 1 + pad)
+          const height = Math.min(img.height - top, maxY - top + 1 + pad)
+          if (width >= 64 && height >= 64 && width * height < img.width * img.height * 0.45) {
+            cropBox = { left, top, width, height }
+          }
+        }
+      }
       const asset = join(dir, `${newId('gen')}.png`)
-      await saveImage(await loadAsset(out.path, img.width, img.height), asset, 'png', 92, 16)
+      let out: { path: string; detail: Record<string, unknown> }
+      if (cropBox !== undefined && maskPath !== undefined) {
+        const cropImgPath = join(scratch, 'crop-in.png')
+        const cropMaskPath = join(scratch, 'crop-mask.png')
+        await sharp(base.path).extract(cropBox).png().toFile(cropImgPath)
+        await sharp(maskPath).extract(cropBox).png().toFile(cropMaskPath)
+        out = await generateWith(opts.provider, { image: cropImgPath, mask: cropMaskPath, prompt: opts.prompt, kind: opts.kind, width: cropBox.width, height: cropBox.height, outDir: scratch, signal: opts.signal })
+        const patch = await loadAsset(out.path, cropBox.width, cropBox.height)
+        const stitched: typeof img = { width: img.width, height: img.height, data: new Float32Array(img.data) }
+        for (let y = 0; y < cropBox.height; y++) {
+          for (let x = 0; x < cropBox.width; x++) {
+            const dst = ((cropBox.top + y) * img.width + (cropBox.left + x)) * 3
+            const src = (y * cropBox.width + x) * 3
+            stitched.data[dst] = patch.data[src] as number
+            stitched.data[dst + 1] = patch.data[src + 1] as number
+            stitched.data[dst + 2] = patch.data[src + 2] as number
+          }
+        }
+        await saveImage(stitched, asset, 'png', 92, 16)
+      } else {
+        out = await generateWith(opts.provider, { image: base.path, mask: maskPath, prompt: opts.prompt, kind: opts.kind, width: img.width, height: img.height, outDir: scratch, signal: opts.signal })
+        // Normalise to the render size so the layer registers with the photo.
+        await saveImage(await loadAsset(out.path, img.width, img.height), asset, 'png', 92, 16)
+      }
       const head = this.head(taskId)
       const ops: EditOp[] = []
       if (!head.doc.stages.some(st => st.engine === 'ai')) ops.push({ op: 'add_stage', engine: 'ai' })

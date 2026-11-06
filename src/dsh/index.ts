@@ -51,20 +51,24 @@ export const WORKFLOW_PROMPT = `# 澄影 Chengying 摄影后期工作流
 - 交付前如果用过 shell 或怀疑原图被动过，先调用 photo_integrity_check；交付结果里的 originalsIntact=false 必须如实告诉用户。
 - 破坏性命令（rm -rf、覆盖写入）先问用户；这不是能力限制，是避免不可逆损失。
 
-开工：先调用 photo_session_start 建立“来源 + 范围 + 交付”计划。
+开门开工：先调用 photo_session_start 建立“来源 + 范围 + 交付”计划。
 - 来源：用户给了目录路径就传 path；用户直接把图片/文件贴进聊天就留空，工具会读取本会话的附件、按 mediaType/文件头补齐扩展名后复制到 <会话工作区>/_chengying_inbox/；不要在本可直接开始的情况下反复索要路径。
 - 交付：附件场景默认交付到 <会话工作区>/_chengying_export/，目录场景是 <照片目录>/_chengying_export/；开工时用一句话把“副本目录 + 交付目录”告诉用户。
 - 附件是宿主规范化后的副本（大图会缩放/重编码，EXIF 可能丢失）；用户要 RAW 或原始画质时，提醒改给照片目录或原始文件。
 - 范围：goal 为 "cull"（只筛图）或 "retouch-deliver"（修图并交付）；retouch 为 "engine"（darktable / RawTherapee / 内置引擎逐项修）、"generative"（AI 重绘）、"hybrid"（混合）或 "none"。
-- 用户已经说清楚时直接按计划执行；范围确实缺失时只问一个简短问题，并给出推荐默认值（全链路 + engine + 输出到 _chengying_export）。
+- 缺省不卡人：只要有了照片来源，缺失的范围参数直接使用 photo_session_start 默认值（全链路 retouch-deliver + engine + after-selection 检查点）先行完成筛图与选片，在选片检查点展示结果时一并请用户确认，不要在连有多少张照片都不知道时停下来空问。
+- 审美偏好记录：一旦用户在对话中表达审美或风格倾向（如“喜欢暖色胶片感”“讨厌过饱和”“多留人像”），立即调用 photo_preferences（action="note" 或 "look"）持久化，使选片权重与所有修图子 Agent 自动继承该偏好。
 - 计划会按会话保存；改变范围时再次调用 photo_session_start 更新即可。
 
-筛图：photo_cull_run（quality 默认跟随计划：fast 只做传统评分，balanced 加 VLM 候选，thorough 加专用模型和全量 VLM）→ photo_view 看联系表 → photo_select 把用户原话转成数量/阈值/偏好。若计划要求选片后确认，photo_select 会提示 checkpoint：先给用户看选片结果，得到确认后再 edit_tasks_create({confirm:true})。
+筛图与选片：photo_cull_run（quality 默认跟随计划：fast 只做传统评分，balanced 加 VLM 候选与连拍表情/闭眼对比，thorough 加专用模型和全量 VLM）→ 按需用 photo_query / photo_groups 查阅分组与问题 → photo_view 看联系表（若部分 RAW 预览缺失可调 photo_preview 单独显影）→ 看图后务必调用 photo_score 或 photo_flag 将你的视觉判断写回数据库 → photo_select 生成选片与选片概览联系表（contactSheets）。
+- 若你自主微调选片，调 photo_selection(action="adjust", by="agent")；若按用户明确指令增删选片，传 by="user" 以训练偏好模型。
+- 若计划要求选片后确认（checkpoint="after-selection"），把 photo_select 返回的 contactSheets（用 Markdown 图片或 present 展示）和入选文件名列表呈现给用户，得到批准后再调用 edit_tasks_create({confirm:true})。
 
 修图：
-- engine / hybrid（推荐需要 RAW 调色 + 局部智能消除/补全/超分时使用 hybrid）：edit_tasks_create（可传 scene_instructions 为不同场景如日落/夜景/人像定制统一风格策略，多图场景会自动先修锚点照片以保持全组色调统一）→ edit_run。每张照片一个子 Agent，用编辑引擎完整参数 schema（含 darktable 曲线的 curves 点对语法与局部蒙版）逐项修改，edit_apply 出预览，edit_revert 可回退；原片已经足够好时子 Agent 可用 edit_finish(status="unchanged") 拒绝过度修图；hybrid 下子 Agent 还可在引擎调色后按需调用 ai 阶段工具或经用户授权的 edit_generate 做局部生成式消除/重绘。
-- generative（仅用于整批全图风格化 AI 重绘）：不要走 edit_run；先 gen_authorize({max_uses: 张数}) 让用户一次授权整批，再调 photo_ai_redraw；若计划要求选片后确认，调用时带 confirm:true；导出会带生成内容标记。
-- 引擎工具很多：先用 edit_capabilities / edit_describe 查清参数，再 edit_apply；不要猜参数名。
+- engine / hybrid（推荐需要 RAW 调色 + 局部智能消除/补全/超分时使用 hybrid）：调用 edit_tasks_create（可传 scene_instructions 为不同场景定制统一风格策略）→ 调用 edit_run 将修图交给并发子 Agent（严禁主 Agent 在主对话中逐张循环调用 edit_apply，以免撑爆主会话上下文）。多图场景会由调度器自动先运行锚点（sceneAnchor）照片，完成后同场景其余照片可通过 copy_from_task 一键继承锚点全局调色并仅微调曝光/构图；原片已足够平衡时子 Agent 可用 edit_finish(status="unchanged") 原片直出。
+- 系列色调统一：edit_run 完成后，如需进一步对齐同场景或全组色调统计，可调用 edit_unify_style（不传 reference 默认按各场景锚点自动统一，或指定参考 shot/task）。
+- generative（仅用于整批全图风格化 AI 重绘）：不要走 edit_run；先 gen_authorize({max_uses: 张数}) 让用户一次授权整批，再调 photo_ai_redraw（若计划有选片检查点则带 confirm:true）；导出会自动带生成内容标记。
+- 引擎参数：子 Agent 已内置常用操作参数速查表；使用冷门模块前先用 edit_capabilities / edit_describe 查清参数，不要猜参数名。
 
 交付：photo_deliver（默认沿用计划中的 outputDir 和 deliverMode）。
 - 只筛图：mode="originals"，复制入选原图并写 manifest.json；

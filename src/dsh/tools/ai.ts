@@ -121,7 +121,7 @@ export function aiTools(rt: ChengyingRuntime): ToolDefinition[] {
         }
         const shotIds = [...ids]
         if (shotIds.length === 0) throw new ChengyingError('invalid-argument', 'nothing to redraw: pass a selection or shot ids')
-        if (plan?.checkpoint === 'after-selection' && args.confirm !== true) {
+        if (plan?.checkpoint === 'after-selection' && plan.checkpointApproved !== true && args.confirm !== true) {
           return { needsConfirmation: true, plan, count: shotIds.length, note: 'The session plan requires a checkpoint after selection. Show the selection/contact sheet to the user; call photo_ai_redraw again with confirm=true after approval.' }
         }
         const now = new Date().toISOString()
@@ -181,33 +181,62 @@ export function aiTools(rt: ChengyingRuntime): ToolDefinition[] {
       },
     }),
 
-    defineTool<{ project?: string; reference: string; tasks?: string[]; selection?: string; strength?: number; color?: boolean; tone?: boolean }>({
+    defineTool<{ project?: string; reference?: string; tasks?: string[]; selection?: string; strength?: number; color?: boolean; tone?: boolean }>({
       name: 'edit_unify_style',
-      description: 'Unify the look of a series: take the style fingerprint of a reference photo (shot id or task id) and add/update an ai:style_match step in every listed task (default: all tasks of the latest selection except the reference). Non-generative and revertible per task.',
-      parameters: obj({ project: projectArg, reference: str('Reference shot id or task id.'), tasks: arr(str('task id'), 'Target tasks.'), selection: str('Selection id (default latest).'), strength: num('0..1 (default 0.5)'), color: { type: 'boolean', description: 'match colour (default true)' }, tone: { type: 'boolean', description: 'match tones (default true)' } }, ['reference']),
+      description: 'Unify the look of a series: take the style fingerprint of a reference photo (shot id, task id, or "scene-anchor" to unify each multi-photo scene against its own scene anchor) and add/update an ai:style_match step in every listed task (default: all tasks of the latest selection except the reference). Non-generative and revertible per task.',
+      parameters: obj({ project: projectArg, reference: str('Reference shot id, task id, or "scene-anchor" (default: "scene-anchor" when omitted).'), tasks: arr(str('task id'), 'Target tasks.'), selection: str('Selection id (default latest).'), strength: num('0..1 (default 0.5)'), color: { type: 'boolean', description: 'match colour (default true)' }, tone: { type: 'boolean', description: 'match tones (default true)' } }),
       async run(args, exec) {
         const project = rt.project(args.project, exec.agent?.id)
         const svc = rt.edit(project)
-        const isTask = project.repo.task(args.reference) !== undefined
-        const ref = await svc.styleReference(isTask ? { taskId: args.reference } : { shotId: args.reference }, exec.signal)
         const selectionId = args.selection ?? project.repo.latestSelectionId()
-        const targets = (args.tasks !== undefined ? args.tasks.map(id => project.repo.task(id)).filter(t => t !== undefined) : project.repo.tasks({ selectionId: selectionId ?? undefined }))
-          .filter(t => t.shotId !== ref.shotId && t.status !== 'cancelled')
-        const results = []
-        for (const t of targets) {
+        const allTasks = (args.tasks !== undefined ? args.tasks.map(id => project.repo.task(id)).filter((t): t is NonNullable<typeof t> => t !== undefined) : project.repo.tasks({ selectionId: selectionId ?? undefined }))
+          .filter(t => t.status !== 'cancelled')
+
+        const applyFingerprint = async (t: NonNullable<ReturnType<typeof project.repo.task>>, fp: unknown, refLabel: string): Promise<{ task: string; shot: string; revision?: number; error?: string }> => {
           try {
             const head = svc.head(t.id)
-            const params = { fingerprint: ref.fingerprint, strength: args.strength ?? 0.5, color: args.color ?? true, tone: args.tone ?? true }
+            const params = { fingerprint: fp, strength: args.strength ?? 0.5, color: args.color ?? true, tone: args.tone ?? true }
             const existing = head.doc.stages.find(s => s.engine === 'ai')?.steps.find(s => s.op === 'style_match' && s.label === 'series look')
             const ops = existing !== undefined
               ? [{ op: 'update_step' as const, step_id: existing.id, params, replace_params: true }]
               : [...(head.doc.stages.some(s => s.engine === 'ai') ? [] : [{ op: 'add_stage' as const, engine: 'ai' }]), { op: 'add_step' as const, stage: 'ai', step: { op: 'style_match', params, label: 'series look' } }]
-            const r = await svc.applyOps(t.id, ops, { author: 'agent', message: `unify look with ${args.reference}`, signal: exec.signal })
-            results.push({ task: t.id, shot: t.shotId, revision: r.revision.seq })
+            const r = await svc.applyOps(t.id, ops, { author: 'agent', message: `unify look with ${refLabel}`, signal: exec.signal })
+            await svc.render(t.id, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal }).catch(() => undefined)
+            return { task: t.id, shot: t.shotId, revision: r.revision.seq }
           } catch (error) {
-            results.push({ task: t.id, shot: t.shotId, error: (error as Error).message })
+            return { task: t.id, shot: t.shotId, error: (error as Error).message }
           }
         }
+
+        if (args.reference === undefined || args.reference === 'scene-anchor') {
+          const byScene = new Map<string, typeof allTasks>()
+          for (const t of allTasks) {
+            const sc = typeof t.options.sceneId === 'string' ? t.options.sceneId : project.repo.groupOf(t.shotId, 'scene')
+            if (sc !== undefined) byScene.set(sc, [...(byScene.get(sc) ?? []), t])
+          }
+          const pairs: Array<{ target: (typeof allTasks)[number]; anchor: (typeof allTasks)[number] }> = []
+          for (const [, group] of byScene) {
+            if (group.length < 2) continue
+            const anchor = [...group].sort((a, b) => Number(b.options.sceneAnchor === true) - Number(a.options.sceneAnchor === true))[0]!
+            for (const t of group) if (t.id !== anchor.id) pairs.push({ target: t, anchor })
+          }
+          const fpCache = new Map<string, Awaited<ReturnType<typeof svc.styleReference>>>()
+          for (const { anchor } of pairs) {
+            if (!fpCache.has(anchor.id)) fpCache.set(anchor.id, await svc.styleReference({ taskId: anchor.id }, exec.signal))
+          }
+          const results = await mapLimit(pairs, Math.max(1, rt.config.editing.maxConcurrent), async ({ target, anchor }) => {
+            const ref = fpCache.get(anchor.id)!
+            return await applyFingerprint(target, ref.fingerprint, anchor.shotId)
+          }, exec.signal)
+          return { reference: { mode: 'scene-anchor', scenes: fpCache.size }, updated: results.filter(r => !('error' in r)).length, results }
+        }
+
+        const isTask = project.repo.task(args.reference) !== undefined
+        const ref = await svc.styleReference(isTask ? { taskId: args.reference } : { shotId: args.reference }, exec.signal)
+        const targets = allTasks.filter(t => t.shotId !== ref.shotId)
+        const results = await mapLimit(targets, Math.max(1, rt.config.editing.maxConcurrent), async (t) => {
+          return await applyFingerprint(t, ref.fingerprint, args.reference!)
+        }, exec.signal)
         return { reference: { id: args.reference, source: ref.source }, updated: results.filter(r => !('error' in r)).length, results }
       },
     }),

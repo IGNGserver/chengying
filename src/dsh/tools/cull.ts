@@ -62,16 +62,36 @@ export function selectVlmCandidates(project: Project, limit: number, force = fal
   for (const g of nearGroups) {
     for (const m of g.members) nearMemberIds.add(m.shotId)
     // Include top 2 contenders from each burst group so VLM can compare them.
-    const topContenders = g.members.slice(0, Math.min(2, g.members.length))
+    // If either of the top 2 has suspected closed eyes or soft subject focus, also include #3.
+    const topTwo = g.members.slice(0, Math.min(2, g.members.length))
+    const hasSuspect = topTwo.some(m => {
+      const issues = project.repo.scores(m.shotId).technical?.issues ?? []
+      return issues.includes('eyes-closed') || issues.includes('subject-out-of-focus')
+    })
+    const topContenders = g.members.slice(0, Math.min(hasSuspect ? 3 : 2, g.members.length))
     for (const m of topContenders) add(m.shotId)
   }
-  const standalone = project.repo.shots()
+  const allShots = project.repo.shots()
+  // Reserve up to 15% of the budget for high-potential RAW shots so underexposed/high-DR
+  // RAW gems are evaluated by the VLM for content and story before selection.
+  const rawGemsBudget = Math.max(1, Math.floor(limit * 0.15))
+  const rawGems = allShots
+    .filter(s => s.rawFile !== null && (project.repo.scores(s.id).technical?.potential ?? 0) >= 72)
+    .sort((a, b) => (project.repo.scores(b.id).technical?.potential ?? 0) - (project.repo.scores(a.id).technical?.potential ?? 0))
+  let gemsAdded = 0
+  for (const s of rawGems) {
+    if (gemsAdded >= rawGemsBudget) break
+    const before = picked.length
+    add(s.id)
+    if (picked.length > before) gemsAdded++
+  }
+  const standalone = allShots
     .filter(s => !nearMemberIds.has(s.id))
     .sort((a, b) => project.rankOf(b.id) - project.rankOf(a.id))
   for (const s of standalone) add(s.id)
   // If budget remains, add remaining burst members ranked by score.
   if (picked.length < limit) {
-    const rest = project.repo.shots().sort((a, b) => project.rankOf(b.id) - project.rankOf(a.id))
+    const rest = allShots.sort((a, b) => project.rankOf(b.id) - project.rankOf(a.id))
     for (const s of rest) add(s.id)
   }
   return picked
@@ -425,31 +445,52 @@ export function cullTools(rt: ChengyingRuntime): ToolDefinition[] {
         const { selectionId, result } = project.select(spec, { name: args.name, base: args.base_selection })
         const chosen = result.items.filter(i => i.included)
         const plan = rt.updatePlanStage(project, exec, 'selected')
+        const contactSheets: string[] = []
+        if (chosen.length > 0) {
+          try {
+            const previewIds = chosen.slice(0, 16).map(i => i.shotId)
+            const labels = chosen.slice(0, 16).map(i => `#${i.rank}`)
+            const captions = chosen.slice(0, 16).map(i => {
+              const s = project.repo.shot(i.shotId)
+              const f = s === undefined ? undefined : project.repo.file(s.primaryFile)
+              return f?.relPath ?? i.shotId
+            })
+            const sheet = await project.sheet(previewIds, { labels, captions, cell: 360 })
+            contactSheets.push(sheet.path)
+          } catch {
+            // Contact sheet is optional when previews have not been built yet.
+          }
+        }
         return {
           selectionId,
           spec,
           stats: result.stats,
-          shots: chosen.slice(0, args.limit ?? 60).map(i => ({ id: i.shotId, rank: i.rank, score: i.score, reason: i.reason, time: project.repo.shot(i.shotId)?.captureTime })),
+          contactSheets,
+          shots: chosen.slice(0, args.limit ?? 60).map(i => {
+            const shot = project.repo.shot(i.shotId)
+            const file = shot === undefined ? undefined : project.repo.file(shot.primaryFile)
+            return { id: i.shotId, file: file?.relPath, rank: i.rank, score: i.score, reason: i.reason, time: shot?.captureTime }
+          }),
           omitted: Math.max(0, chosen.length - (args.limit ?? 60)),
           checkpoint: plan?.checkpoint ?? 'none',
           next: plan?.checkpoint === 'after-selection'
-            ? 'Show the selection or a contact sheet to the user. After approval call edit_tasks_create with confirm=true (or photo_ai_redraw for a generative plan).'
+            ? 'Show the selection contact sheet (contactSheets) and shot list to the user. After approval call edit_tasks_create with confirm=true (or photo_ai_redraw for a generative plan).'
             : undefined,
         }
       },
     }),
 
-    defineTool<{ project?: string; action?: string; selection?: string; add?: string[]; remove?: string[]; lock?: string[]; unlock?: string[] }>({
+    defineTool<{ project?: string; action?: string; selection?: string; add?: string[]; remove?: string[]; lock?: string[]; unlock?: string[]; by?: 'user' | 'agent' }>({
       name: 'photo_selection',
-      description: 'Inspect or adjust selections. action=list (all selections), show (items with reasons), adjust (add/remove/lock/unlock shots; adjustments made on the user\'s behalf are recorded as user feedback and teach the preference profile).',
-      parameters: obj({ project: projectArg, action: strEnum(['list', 'show', 'adjust'], 'default show'), selection: str('Selection id (default latest).'), add: arr(str('shot id'), 'add'), remove: arr(str('shot id'), 'remove'), lock: arr(str('shot id'), 'lock'), unlock: arr(str('shot id'), 'unlock') }),
+      description: 'Inspect or adjust selections. action=list (all selections), show (items with reasons), adjust (add/remove/lock/unlock shots; pass by="user" when fulfilling an explicit user instruction so it teaches the preference profile, or by="agent" when refining autonomously after photo_view).',
+      parameters: obj({ project: projectArg, action: strEnum(['list', 'show', 'adjust'], 'default show'), selection: str('Selection id (default latest).'), add: arr(str('shot id'), 'add'), remove: arr(str('shot id'), 'remove'), lock: arr(str('shot id'), 'lock'), unlock: arr(str('shot id'), 'unlock'), by: strEnum(['user', 'agent'], 'Who initiated the adjustment (default user; pass agent for autonomous review adjustments).') }),
       async run(args, exec) {
         const project = P(args, exec)
         if (args.action === 'list') return { selections: project.repo.selections() }
         const id = args.selection ?? project.repo.latestSelectionId()
         if (id === undefined) throw new ChengyingError('not-found', 'no selection yet; use photo_select')
         if (args.action === 'adjust') {
-          const r = project.adjustSelection(id, { add: args.add, remove: args.remove, lock: args.lock, unlock: args.unlock }, 'user')
+          const r = project.adjustSelection(id, { add: args.add, remove: args.remove, lock: args.lock, unlock: args.unlock }, args.by ?? 'user')
           return { selectionId: id, ...r }
         }
         const sel = project.repo.selection(id)

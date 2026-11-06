@@ -70,21 +70,47 @@ async function viaOpenAi(p: GenerativeProvider, req: GenerateRequest): Promise<{
   const key = apiKey(p)
   if (key === undefined || key === '') throw new ChengyingError('engine-unavailable', `provider ${p.id}: set ${p.apiKeyEnv ?? 'OPENAI_API_KEY'} in the environment`)
   const base = (p.url ?? 'https://api.openai.com/v1').replace(/\/$/, '')
-  // The API expects square-ish PNGs ≤ 4 MB for some models; send ≤ 1536 px.
-  const edge = 1536
-  const image = await sharp(req.image).resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true }).png().toBuffer()
+  // Match OpenAI's supported edit sizes to the input aspect ratio and letterbox
+  // non-standard ratios so the returned image is never stretched out of proportion.
+  const aspect = req.width / Math.max(1, req.height)
+  const target = aspect > 1.15
+    ? { w: 1536, h: 1024, size: '1536x1024' }
+    : aspect < 0.87
+      ? { w: 1024, h: 1536, size: '1024x1536' }
+      : { w: 1024, h: 1024, size: '1024x1024' }
+  const resized = await sharp(req.image)
+    .resize({ width: target.w, height: target.h, fit: 'inside', withoutEnlargement: true })
+    .png()
+    .toBuffer({ resolveWithObject: true })
+  const padLeft = Math.max(0, Math.floor((target.w - resized.info.width) / 2))
+  const padRight = Math.max(0, target.w - resized.info.width - padLeft)
+  const padTop = Math.max(0, Math.floor((target.h - resized.info.height) / 2))
+  const padBottom = Math.max(0, target.h - resized.info.height - padTop)
+  const image = (padLeft > 0 || padRight > 0 || padTop > 0 || padBottom > 0)
+    ? await sharp(resized.data).extend({ top: padTop, bottom: padBottom, left: padLeft, right: padRight, background: '#000000' }).png().toBuffer()
+    : resized.data
   const form = new FormData()
   form.set('model', p.model ?? 'gpt-image-1')
   form.set('prompt', req.prompt)
   form.set('n', '1')
+  form.set('size', target.size)
   form.set('image', new Blob([new Uint8Array(image)], { type: 'image/png' }), 'image.png')
   if (req.mask !== undefined) {
     // OpenAI masks: fully transparent pixels mark the area to edit.
-    const meta = await sharp(image).metadata()
-    const m = await sharp(req.mask).resize({ width: meta.width, height: meta.height, fit: 'fill' }).greyscale().negate().raw().toBuffer()
-    const rgba = Buffer.alloc((meta.width as number) * (meta.height as number) * 4)
-    for (let i = 0; i < m.length; i++) { rgba[i * 4] = 0; rgba[i * 4 + 1] = 0; rgba[i * 4 + 2] = 0; rgba[i * 4 + 3] = m[i] as number }
-    const mask = await sharp(rgba, { raw: { width: meta.width as number, height: meta.height as number, channels: 4 } }).png().toBuffer()
+    const innerMask = await sharp(req.mask).resize({ width: resized.info.width, height: resized.info.height, fit: 'fill' }).greyscale().negate().raw().toBuffer()
+    const paddedW = resized.info.width + padLeft + padRight
+    const paddedH = resized.info.height + padTop + padBottom
+    const rgba = Buffer.alloc(paddedW * paddedH * 4, 255)
+    for (let y = 0; y < resized.info.height; y++) {
+      for (let x = 0; x < resized.info.width; x++) {
+        const dstIdx = ((y + padTop) * paddedW + (x + padLeft)) * 4
+        rgba[dstIdx] = 0
+        rgba[dstIdx + 1] = 0
+        rgba[dstIdx + 2] = 0
+        rgba[dstIdx + 3] = innerMask[y * resized.info.width + x] as number
+      }
+    }
+    const mask = await sharp(rgba, { raw: { width: paddedW, height: paddedH, channels: 4 } }).png().toBuffer()
     form.set('mask', new Blob([new Uint8Array(mask)], { type: 'image/png' }), 'mask.png')
   }
   const res = await fetch(`${base}/images/edits`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, signal: req.signal })
@@ -95,9 +121,19 @@ async function viaOpenAi(p: GenerativeProvider, req: GenerateRequest): Promise<{
   if (item?.b64_json !== undefined) buf = Buffer.from(item.b64_json, 'base64')
   else if (item?.url !== undefined) buf = Buffer.from(await (await fetch(item.url, { signal: req.signal })).arrayBuffer())
   else throw new ChengyingError('engine-failed', `provider ${p.id}: empty response`)
+  if (padLeft > 0 || padRight > 0 || padTop > 0 || padBottom > 0) {
+    try {
+      const outMeta = await sharp(buf).metadata()
+      if (outMeta.width === target.w && outMeta.height === target.h) {
+        buf = await sharp(buf).extract({ left: padLeft, top: padTop, width: resized.info.width, height: resized.info.height }).png().toBuffer()
+      }
+    } catch {
+      // Keep original buffer if cropping metadata fails.
+    }
+  }
   const out = join(req.outDir, `gen-${Date.now()}.png`)
   writeFileSync(out, buf)
-  return { path: out, detail: { model: p.model ?? 'gpt-image-1', url: base } }
+  return { path: out, detail: { model: p.model ?? 'gpt-image-1', url: base, size: target.size } }
 }
 
 async function viaComfy(p: GenerativeProvider, req: GenerateRequest): Promise<{ path: string; detail: Record<string, unknown> }> {

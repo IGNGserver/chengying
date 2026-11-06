@@ -78,7 +78,7 @@ export function technicalScore(f: Features, ctx: ShotContext): ScoreSet {
   if (castScore < 0.6) issues.push('color-cast')
 
   let technical = 100 * (0.45 * sharp + 0.25 * exposure + 0.13 * noise + 0.1 * contrast + 0.07 * castScore)
-  if (sub?.eyesClosedSuspected === true) technical = Math.max(0, technical - 18)
+  if (sub?.eyesClosedSuspected === true) technical = Math.max(0, technical - 14)
   return {
     technical: round(technical, 1),
     issues,

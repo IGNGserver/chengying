@@ -7,7 +7,13 @@ import sharp, { type OverlayOptions } from 'sharp'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-export interface SheetCell { label: string; path: string; caption?: string }
+export interface SheetCell {
+  label: string
+  path: string
+  caption?: string
+  /** Optional normalized [x, y, w, h] face bounding box (0..1) for a 1:1 eye/expression inset. */
+  faceBox?: [number, number, number, number]
+}
 
 function escapeXml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c] as string))
@@ -33,6 +39,38 @@ export async function contactSheet(cells: SheetCell[], dest: string, options: { 
     const ox = x + Math.floor((cell - img.info.width) / 2)
     const oy = y + labelH + Math.floor((cell - img.info.height) / 2)
     composites.push({ input: img.data, left: ox, top: oy })
+    // When a portrait face box is present, overlay a high-res face/eye zoom inset in the bottom-right corner
+    // so VLM contact-sheet scoring can inspect open/closed eyes and expressions accurately.
+    if (c.faceBox !== undefined && cell >= 280) {
+      try {
+        const meta = await sharp(c.path).metadata()
+        const sw = meta.width ?? 0
+        const sh = meta.height ?? 0
+        if (sw >= 120 && sh >= 120) {
+          const [fx, fy, fw, fh] = c.faceBox
+          const padX = fw * 0.15
+          const padY = fh * 0.15
+          const left = Math.max(0, Math.floor((fx - padX) * sw))
+          const top = Math.max(0, Math.floor((fy - padY) * sh))
+          const cropW = Math.min(sw - left, Math.max(32, Math.ceil((fw + 2 * padX) * sw)))
+          const cropH = Math.min(sh - top, Math.max(32, Math.ceil((fh + 2 * padY) * sh)))
+          const insetSize = Math.max(72, Math.min(136, Math.round(cell * 0.28)))
+          const inset = await sharp(c.path)
+            .extract({ left, top, width: cropW, height: cropH })
+            .resize({ width: insetSize - 4, height: insetSize - 4, fit: 'cover' })
+            .extend({ top: 2, bottom: 2, left: 2, right: 2, background: '#ffd54f' })
+            .jpeg({ quality: 86 })
+            .toBuffer()
+          composites.push({
+            input: inset,
+            left: x + cell - insetSize - 4,
+            top: y + labelH + cell - insetSize - 4,
+          })
+        }
+      } catch {
+        // Ignore inset errors and keep the main cell thumbnail.
+      }
+    }
     const text = escapeXml(c.caption === undefined ? c.label : `${c.label}  ${c.caption}`)
     const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${cell}" height="${labelH}"><rect width="100%" height="100%" fill="#202124"/><text x="6" y="18" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffd54f">${text}</text></svg>`)
     composites.push({ input: svg, left: x, top: y })

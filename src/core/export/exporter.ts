@@ -96,6 +96,13 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
       if (head === undefined) throw new ChengyingError('internal', `task ${task.id} head revision missing`)
       doc = head.doc
       revisionId = head.id
+      // When a task finished with status="unchanged" (0 active steps) on a RAW+JPEG pair
+      // whose culling preview came from the paired camera JPEG, preserve the camera JPEG
+      // source instead of exporting a flat ungraded RAW baseline.
+      const hasActiveSteps = doc.stages.some(s => s.steps.some(st => st.enabled))
+      if (task.options.unchanged === true && !hasActiveSteps && shot.rasterFile !== null && doc.sourceFile === shot.rawFile) {
+        doc = { schema: 1, sourceFile: shot.rasterFile, stages: [{ id: 'unchanged_raster', engine: 'builtin', steps: [] }] }
+      }
     } else {
       const kind: 'raw' | 'raster' = shot.rawFile !== null ? 'raw' : 'raster'
       const engine = await edit.engines.pick(kind)

@@ -29,7 +29,7 @@ export interface PlanInfo {
   id: string; sessionId: string; projectId: string; source: string
   goal: 'cull' | 'retouch-deliver'; retouch: 'none' | 'engine' | 'generative' | 'hybrid'
   cullQuality: 'fast' | 'balanced' | 'thorough'; outputDir: string
-  deliverMode: 'originals' | 'rendered'; checkpoint: 'after-selection' | 'none'
+  deliverMode: 'originals' | 'rendered'; checkpoint: 'after-selection' | 'none'; checkpointApproved?: boolean
   brief: string; stage: string; createdAt: string; updatedAt: string
 }
 

@@ -26,6 +26,7 @@ export interface SessionPlan {
   outputDir: string
   deliverMode: DeliverMode
   checkpoint: 'after-selection' | 'none'
+  checkpointApproved?: boolean
   brief: string
   stage: PlanStage
   createdAt: string
