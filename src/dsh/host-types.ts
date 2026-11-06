@@ -163,6 +163,30 @@ export interface SystemPromptService {
   section(spec: unknown, content?: unknown): () => void
 }
 
+/** `ctx.shellEnv` from dsh-shell-env: trusted `DSH_*` variables per shell call. */
+export interface ShellEnvContributorLike {
+  name: string
+  variables: Record<string, { description: string }>
+  resolve(execution: { agent?: AgentLike }): Record<string, string | undefined>
+}
+
+export interface ShellEnvService {
+  register(contributor: ShellEnvContributorLike): () => void
+}
+
+/** `ctx.skills.register()` from dsh-skill: a runtime skill contribution. */
+export interface SkillRegistrationLike {
+  name: string
+  description: string
+  content: string
+  whenToUse?: string
+  source?: string
+}
+
+export interface SkillsService {
+  register(skill: SkillRegistrationLike): () => void
+}
+
 /** The subset of the Cordis Context surface used by the plugin. */
 export interface HostContext {
   tools: ToolsService

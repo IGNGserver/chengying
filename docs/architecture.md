@@ -10,16 +10,20 @@ DSH host (bundle chengying-host, mode: auto)
         │
 DSH agent preset "chengying" (presets/chengying.patch.yml)
   ├─ tools/session.ts   photo_session_start / photo_workspace_import / photo_deliver
+  ├─ tools/audit.ts     photo_integrity_check (original baseline)
   ├─ tools/cull.ts      photo_* (phase 1)
   ├─ tools/edit.ts      edit_* / export_run (phase 2)
   ├─ tools/ai.ts        edit_generate / photo_ai_redraw / gen_* (phase 3)
+  ├─ skills.ts          runtime skills: batch-ops, engine-troubleshoot
   ├─ orchestrator.ts    editing sub-agents (ctx.subagents), concurrency, usage
+  ├─ general tools      bash/pwsh · jobs · present · subagent/workflow · skill · goal · schedule · plan-mode
   └─ system prompt      plan → cull → select → retouch/redraw → deliver
         │
         ▼
 src/core (host-independent; also used by the CLI and tests)
   ├─ project.ts        one workspace = one SQLite DB (node:sqlite) under stateRoot
   ├─ fsguard.ts        read: workspace + own dirs; write: own dirs only; originals never writable
+  ├─ integrity.ts      scan-time size/mtime/hash baseline; check / repair
   ├─ scan/ meta/       discovery, RAW+JPEG pairing, ExifTool metadata
   ├─ image/ analysis/  previews, pixel features (worker pool), scoring, VLM, models
   ├─ grouping/ select/ duplicates, scenes, trip segments, MMR + narrative selection, preferences
@@ -32,12 +36,17 @@ src/core (host-independent; also used by the CLI and tests)
   │   └─ engines/      adapters
   └─ export/
       ├─ exporter.ts   full-res render + metadata copy + read-back verification + recipes
-      └─ deliver.ts    original-copy delivery + manifest
+      ├─ deliver.ts    original-copy delivery + manifest
+      └─ zip.ts        store-only delivery archive
 ```
 
 ## 预设与 Host/Agent 分层
 
 DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会话的 persona、工具、提示词与 skill。澄影不再把 30+ 摄影工具注册到 Host 层；Host 行只保留 runtime、HTTP 面板和共享服务，`presets/chengying.patch.yml` 在选中预设时挂载 Agent 行。Headless/直接 `--patch` 没有 preset roster，`mode: auto` 自动退化为单行 `both`。
+
+Web 的 web-app patch 会禁用全局模型工具行（bash、fs、jobs、subagent 等），每个预设必须自己列出完整工具面。澄影预设因此在摄影工具之外显式挂载通用工具：bash/pwsh、jobs、present、subagent/subagent_fork、workflow、skill、goal、schedule、plan-mode。Host 行额外做两件事：注册 `shell-env` 的 `DSH_CHENGYING_*` 变量，以及把随包 skill 注册进 `ctx.skills`。这些是叠加，不是替换。
+
+预设只决定工具与提示词组合，不是安全沙箱；`FsGuard` 约束摄影工具，shell 不受它约束（见“安全边界”）。
 
 ## 会话计划
 
@@ -60,7 +69,7 @@ DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会�
 ## 数据与持久化
 
 - 每个工作区在 `stateRoot/projects/<id>/` 下有一个 SQLite 数据库和 `previews/ thumbs/ renders/ assets/ sheets/ scratch/` 目录；工作区本身只被读取。
-- 表：files、shots、features、scores、groups、selections、tasks、revisions、events、usage、exports、authorizations、prefs、feedback。
+- 表：files、shots、features、scores、groups、selections、tasks、revisions、events、usage、exports、authorizations、prefs、feedback、originals_baseline。
 - 修订是不可变的 `EditDocument`（源文件 + 有序阶段 + 每阶段步骤 + 来源标记）。撤销/检出是"把旧文档作为新修订"，历史不丢。
 - 任务状态机：queued → running → succeeded / failed / paused / cancelled / waiting-authorization。宿主重启时 running 的任务回到 queued，子 Agent 从最新修订继续。
 
@@ -81,11 +90,12 @@ DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会�
 
 ## 子 Agent 隔离
 
-`EditOrchestrator` 为每个任务预留 child id，监听 `agent/created`，在子 Agent 自己的作用域注册任务绑定工具（无 `task` 参数），并 `restrict` 全局工具到只读的引擎发现工具。子 Agent 不能运行 shell、不能读写任意文件、不能操作其他任务或修改授权。
+`EditOrchestrator` 为每个任务预留 child id，监听 `agent/created`，在子 Agent 自己的作用域注册任务绑定工具（无 `task` 参数），并 `restrict` 全局工具到只读的引擎发现工具。这个限制会过滤祖先层（包括预设挂载的 bash/pwsh），所以主 Agent 可以用 shell，修图子 Agent 仍然不能用；子 Agent 也不能读写任意文件、操作其他任务或修改授权。
 
 ## 安全边界
 
 - `FsGuard`：读限于工作区与插件目录；写限于插件状态目录、项目导出目录和本次显式交付目录（`addWritableRoot` 按需加入，扫描会跳过它）；原图路径永远拒绝写入；外部命令只接收插件生成的临时文件路径。
+- 原图完整性：扫描时把 `size`/`mtime`（以及可用的全量 SHA-256）写入 `originals_baseline`，重扫不覆盖；`photo_integrity_check` 对比基线，`photo_deliver` 交付前自动快速检查并把 `originalsIntact` 写进结果与 manifest，`repair_baseline` 是显式接受当前状态。shell 绕过 FsGuard 时，这套基线负责**发现**而不是阻止越界。
 - 生成式授权：`acquireGenerative` 只接受用户授予的记录、DSH 审批提示中的"允许"，或显式配置的策略；渲染时校验每个生成图层携带的授权 ID。
 - 凭据：生成式提供者的 API key 只从配置指定的环境变量读取，不进入配置文件、日志或数据库。
 - HTTP 面板 API 经 `ctx.connection.requestRejection` 校验，只服务插件目录中的文件。

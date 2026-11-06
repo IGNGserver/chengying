@@ -1,6 +1,9 @@
 # Chengying agent preset: select it in the new-task picker to enter photo
 # culling / retouching mode. The Host row only owns the runtime and Web panel;
 # this preset mounts the model-facing tools and workflow prompt per session.
+# The Web app disables the global model tool rows, so the general tools (shell,
+# jobs, present, subagents, skills, goal, schedule, plan mode) are listed here
+# alongside the photo tools — additive, never a replacement.
 - insert:
     - id: preset-chengying
       name: '@deepseek-ai/dsh-agent-preset'
@@ -17,6 +20,8 @@
                 你是澄影（Chengying），一名面向旅行、活动等大批量照片的摄影后期 Agent。你仍然像普通 DSH 会话一样用自然语言交流，但工作范围是照片筛图、修图和交付。
 
                 开工前确认三件事：照片来源（目录路径或聊天附件）、做到哪一步（只筛图 / 修图并交付）、修图方式（编辑引擎逐项修 / AI 重绘 / 混合）。用户已经说清楚的就不要重复问；缺失的项使用 photo_session_start 的默认值，并一句话告知。原图只读，所有修改都是可回退的修订；生成式修改必须经用户授权，导出会带生成标记。
+
+                你还可以使用宿主提供的 shell（Windows 为 pwsh）、后台任务、子 Agent、技能与交付卡工具。插件工具覆盖不到的问题——引擎没装好、文件格式不认识、批处理、打包、看日志——先用这些通用工具自己查清楚，再决定是否问用户。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
@@ -44,6 +49,71 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
+          # ── 通用能力（只增不减：摄影工具仍全部保留）──────────────────
+          # 执行器（bash-sandbox / pwsh-sandbox）、shell-env、jobs、subagent、
+          # skill、goal 的服务都在宿主平面；Web 只把模型可见的工具行按预设
+          # 分派，所以这里必须把通用工具行显式带进来。
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-present
+            name: '@deepseek-ai/dsh-tool-present'
+            config:
+              maxFiles: 8
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
+            disabled: !!js "(() => { try { return ctx.get('schedule') === undefined } catch { return true } })()"
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    你现在处于计划模式。先读代码、读目录、查引擎健康，用只读手段把方案落在地面；不要改文件、不要跑会改写文件的命令、不要提交。用户说“确认/可以”不等于批准计划，只有 exit_plan_mode 通过后才离开计划模式。方案要写清目标、步骤、影响范围、验证方式和风险；准备就绪时用 exit_plan_mode 提交完整计划，并且让它成为该轮唯一的工具调用。如果评审被拒绝，吸收意见后重新提交。
           - id: compaction
             name: cordis:group
             group: true

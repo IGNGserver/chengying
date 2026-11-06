@@ -154,13 +154,14 @@ describe('session plan and intake', () => {
       mode: 'originals',
       project: { id: project.id, root: project.root },
       plan: readPlan(project, 's1') ?? null,
-      summary: { exported: out.exported, failed: out.failed, metadataVerified: true },
+      summary: { exported: out.exported, failed: out.failed, metadataVerified: true, originalsIntact: true },
       items: out.items,
     })
-    const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { format: string; mode: string; summary: { exported: number } }
+    const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { format: string; mode: string; summary: { exported: number; originalsIntact: boolean } }
     expect(parsed.format).toBe('chengying-delivery/1')
     expect(parsed.mode).toBe('originals')
     expect(parsed.summary.exported).toBe(2)
+    expect(parsed.summary.originalsIntact).toBe(true)
   })
 
   it('photo_deliver copies picked originals into the requested directory', async () => {
