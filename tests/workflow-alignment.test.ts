@@ -247,11 +247,11 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
     const pairWs = await freshDir('pair-ws')
     await mkdir(pairWs, { recursive: true })
     const srcJpg = join(root, 'day1', 'DSC_0001.JPG')
-    const noGpsPrimary = join(pairWs, 'IMG_9001.TIFF')
+    const noGpsPrimary = join(pairWs, 'IMG_9001.DNG')
     const gpsCompanion = join(pairWs, 'IMG_9001.JPG')
     await sharp(srcJpg).tiff().toFile(noGpsPrimary)
     await copyFile(srcJpg, gpsCompanion)
-    // Strip GPS from primary TIFF while keeping DateTimeOriginal; companion JPG retains GPS
+    // Strip GPS from primary DNG while keeping DateTimeOriginal; companion JPG retains GPS
     await project.metadata.exec(['-overwrite_original', '-DateTimeOriginal=2026:05:01 08:10:00', '-GPS:all=', noGpsPrimary])
 
     const pairProj = Project.open(pairWs, { stateRoot: state })
@@ -259,6 +259,7 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
       await pairProj.scan()
       await pairProj.buildPreviews()
       await pairProj.analyze()
+      expect(pairProj.repo.shots()).toHaveLength(1)
       const shot = pairProj.repo.shots()[0]!
       const svc = new EditService(pairProj, new EngineRegistry(join(state, 'pair-eng'), { darktable: { enabled: false }, rawtherapee: { enabled: false } }))
       const exp = await exportPhotos(pairProj, svc, { shotIds: [shot.id], c2pa: true })
