@@ -84,8 +84,13 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
+              # dsh 0.2.2-rc.1 把 list-agents 并进主入口并删掉了这个子路径导出，
+              # 0.2.1.x 仍然需要单独一行。预设里任何一行导入失败都会让
+              # mountPreset 整体抛错（预设直接加载不出来），所以这里按“运行时能否
+              # 解析到”决定是否启用：能解析就挂，解析不到就跳过这一行。
               - id: tool-subagent-list-agents
                 name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+                disabled: !!js "(() => { try { const base = String(ctx.baseUrl ?? ''); const from = base.endsWith('/') ? base : base + '/'; process.getBuiltinModule('node:module').createRequire(from).resolve('@deepseek-ai/dsh-tool-subagent-control/list-agents'); return false } catch { return true } })()"
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
