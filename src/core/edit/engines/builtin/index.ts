@@ -40,7 +40,7 @@ export class BuiltinEngine implements EngineAdapter {
     const operations: OperationSpec[] = BUILTIN_OPS.map(o => ({
       id: o.id,
       title: o.title,
-      description: o.description + (o.geometry ? ' (geometry: applied after tone/color operators, in step order)' : ''),
+      description: o.description + (o.geometry ? ' (geometry: applied in step order; updates canvas dimensions for subsequent steps and masks)' : ''),
       category: o.category,
       version: 1,
       params: o.params,
@@ -87,8 +87,7 @@ export class BuiltinEngine implements EngineAdapter {
     const ctx: OpContext = { readable: req.readable ?? ((p: string) => p), seed: Number(opts.seed ?? 1) }
     const steps = req.stage.steps.filter(s => s.enabled)
     const ops = new Map(BUILTIN_OPS.map(o => [o.id, o]))
-    const ordered = [...steps.filter(s => !ops.get(s.op)?.geometry), ...steps.filter(s => ops.get(s.op)?.geometry)]
-    for (const s of ordered) {
+    for (const s of steps) {
       req.signal?.throwIfAborted()
       const { step, warnings: w } = this.validateStep(s, catalog)
       warnings.push(...w)

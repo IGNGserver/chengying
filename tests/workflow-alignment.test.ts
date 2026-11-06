@@ -13,8 +13,9 @@ import { EditService } from '../src/core/edit/service.ts'
 import { exportPhotos } from '../src/core/export/exporter.ts'
 import { ChengyingRuntime } from '../src/dsh/runtime.ts'
 import { resolveConfig } from '../src/dsh/config.ts'
-import { selectVlmCandidates } from '../src/dsh/tools/cull.ts'
+import { selectVlmCandidates, cullTools } from '../src/dsh/tools/cull.ts'
 import { taskManagementTools, taskTools } from '../src/dsh/tools/edit.ts'
+import { aiTools } from '../src/dsh/tools/ai.ts'
 import { buildRouter } from '../src/dsh/http.ts'
 import { EditOrchestrator } from '../src/dsh/orchestrator.ts'
 import { defaultPlan, writePlan } from '../src/dsh/plan.ts'
@@ -188,7 +189,7 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
       apply.execute({ ops: [{ op: 'add_step', stage: 'builtin', step: { op: 'tone', params: { contrast: 10 } } }], preview: false }, execFor(stubCtx(), 'edit_apply')),
     ).rejects.toThrow(/revision budget reached/)
 
-    // Finish anchor as succeeded; check sibling prompt receives scene anchor context
+    // Finish anchor as succeeded; check sibling prompt receives scene anchor context + engine cheat sheet + copy_from_task hint
     await finish.execute({ summary: 'warmed golden light' }, execFor(stubCtx(), 'edit_finish'))
     const siblingTask = project.repo.tasks().find(t => t.id !== anchorTask.id && (t.shotId === shotA || t.shotId === shotB))!
     const orch = new EditOrchestrator(rt, stubCtx())
@@ -196,10 +197,13 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
     expect(siblingPrompt).toContain('warm golden sunset consistency')
     expect(siblingPrompt).toContain('Scene consistency')
     expect(siblingPrompt).toContain(anchorTask.shotId)
+    expect(siblingPrompt).toContain('copy_from_task')
+    expect(siblingPrompt).toContain('Core "builtin" operations')
 
-    // Sibling decides original is already optimal -> status="unchanged"
+    // Sibling inherits anchor global steps via copy_from_task, then decides original is already optimal -> status="unchanged"
     const siblingBound = taskTools(rt, { projectId: project.id, taskId: siblingTask.id })
-    await siblingBound.find(t => t.name === 'edit_apply')!.execute({ ops: [{ op: 'add_step', stage: 'builtin', step: { op: 'exposure', params: { ev: 0.2 } } }], preview: false }, execFor(stubCtx(), 'edit_apply'))
+    await siblingBound.find(t => t.name === 'edit_apply')!.execute({ ops: [{ op: 'copy_from_task', task_id: anchorTask.id }], preview: false }, execFor(stubCtx(), 'edit_apply'))
+    expect(rt.edit(project).head(siblingTask.id).doc.stages[0]?.steps.map(s => s.op)).toContain('exposure')
     const finUnchanged = await siblingBound.find(t => t.name === 'edit_finish')!.execute({ status: 'unchanged', summary: 'original exposure and mood already optimal' }, execFor(stubCtx(), 'edit_finish')) as { status: string; unchanged: boolean }
     expect(finUnchanged).toMatchObject({ status: 'succeeded', unchanged: true })
     expect(rt.edit(project).head(siblingTask.id).doc.stages.every(s => s.steps.length === 0)).toBe(true)
@@ -243,11 +247,11 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
     const pairWs = await freshDir('pair-ws')
     await mkdir(pairWs, { recursive: true })
     const srcJpg = join(root, 'day1', 'DSC_0001.JPG')
-    const noGpsPrimary = join(pairWs, 'IMG_9001.TIFF')
+    const noGpsPrimary = join(pairWs, 'IMG_9001.DNG')
     const gpsCompanion = join(pairWs, 'IMG_9001.JPG')
     await sharp(srcJpg).tiff().toFile(noGpsPrimary)
     await copyFile(srcJpg, gpsCompanion)
-    // Strip GPS from primary TIFF while keeping DateTimeOriginal; companion JPG retains GPS
+    // Strip GPS from primary DNG while keeping DateTimeOriginal; companion JPG retains GPS
     await project.metadata.exec(['-overwrite_original', '-DateTimeOriginal=2026:05:01 08:10:00', '-GPS:all=', noGpsPrimary])
 
     const pairProj = Project.open(pairWs, { stateRoot: state })
@@ -255,6 +259,7 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
       await pairProj.scan()
       await pairProj.buildPreviews()
       await pairProj.analyze()
+      expect(pairProj.repo.shots()).toHaveLength(1)
       const shot = pairProj.repo.shots()[0]!
       const svc = new EditService(pairProj, new EngineRegistry(join(state, 'pair-eng'), { darktable: { enabled: false }, rawtherapee: { enabled: false } }))
       const exp = await exportPhotos(pairProj, svc, { shotIds: [shot.id], c2pa: true })
@@ -280,5 +285,43 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
     }
     await router.dispatch({ method: 'GET', path: ['p', project.id, 'shots'], query: new URLSearchParams('min_score=99'), body: undefined }, fakeRes as unknown as import('node:http').ServerResponse)
     expect(captured.total).toBe(0)
+  }, 120_000)
+
+  it('supports selection contact sheets, agent vs user preference isolation, web checkpoint approval, and per-scene style unification', async () => {
+    const cTools = cullTools(rt)
+    const selectTool = cTools.find(t => t.name === 'photo_select')!
+    const selTool = cTools.find(t => t.name === 'photo_selection')!
+    const selRes = await selectTool.execute({ count: 3, request: '挑3张' }, execFor(stubCtx(), 'photo_select')) as {
+      selectionId: string
+      contactSheets?: string[]
+      shots: Array<{ id: string; file?: string }>
+    }
+    expect(selRes.contactSheets?.length).toBeGreaterThanOrEqual(1)
+    expect(existsSync(selRes.contactSheets![0]!)).toBe(true)
+    expect(selRes.shots[0]?.file).toMatch(/\.JPG$/i)
+
+    // Autonomous agent selection adjustment does not pollute user preference learning
+    const beforeExamples = project.profile().examples
+    const extraShot = project.repo.shots().find(s => !selRes.shots.some(x => x.id === s.id))!
+    await selTool.execute({ action: 'adjust', selection: selRes.selectionId, add: [extraShot.id], by: 'agent' }, execFor(stubCtx(), 'photo_selection'))
+    expect(project.profile().examples).toBe(beforeExamples)
+
+    // Web panel approval unlocks after-selection checkpoint without needing confirm=true
+    writePlan(project, defaultPlan(project, 'align-session', root, { goal: 'retouch-deliver', retouch: 'engine', checkpoint: 'after-selection' }))
+    const createTool = taskManagementTools(rt).find(t => t.name === 'edit_tasks_create')!
+    const gated = await createTool.execute({ selection: selRes.selectionId, instructions: 'test gate' }, execFor(stubCtx(), 'edit_tasks_create')) as { needsConfirmation?: boolean }
+    expect(gated.needsConfirmation).toBe(true)
+
+    const router = buildRouter(rt)
+    const approveRes = { headersSent: false, writableEnded: false, statusCode: 200, setHeader() {}, end() { approveRes.writableEnded = true } }
+    await router.dispatch({ method: 'POST', path: ['p', project.id, 'plan', 'approve-selection'], query: new URLSearchParams(), body: {} }, approveRes as unknown as import('node:http').ServerResponse)
+
+    const unlocked = await createTool.execute({ selection: selRes.selectionId, instructions: 'test unlocked', force: true }, execFor(stubCtx(), 'edit_tasks_create')) as { created: Array<{ id: string }> }
+    expect(unlocked.created.length).toBeGreaterThanOrEqual(2)
+
+    // Scene-anchor auto unification in edit_unify_style
+    const unifyTool = aiTools(rt).find(t => t.name === 'edit_unify_style')!
+    const unified = await unifyTool.execute({ selection: selRes.selectionId }, execFor(stubCtx(), 'edit_unify_style')) as { reference: { mode?: string } }
+    expect(unified.reference.mode).toBe('scene-anchor')
   }, 120_000)
 })

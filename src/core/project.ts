@@ -269,7 +269,8 @@ export class Project {
   rankOf(shotId: string): number {
     const sc = this.repo.scores(shotId)
     const d = mergeDims(sc)
-    return (d.technical ?? 0) * 0.5 + (d.aesthetic ?? 0) * 0.5
+    const base = (d.technical ?? 0) * 0.5 + (d.aesthetic ?? 0) * 0.5
+    return d.potential !== undefined ? base * 0.85 + d.potential * 0.15 : base
   }
 
   regroup(): Record<string, number> {
@@ -278,7 +279,8 @@ export class Project {
     const scores = this.repo.allScores()
     const rank = (id: string): number => {
       const d = mergeDims(scores.get(id) ?? {})
-      return (d.technical ?? 0) * 0.5 + (d.aesthetic ?? 0) * 0.5
+      const base = (d.technical ?? 0) * 0.5 + (d.aesthetic ?? 0) * 0.5
+      return d.potential !== undefined ? base * 0.85 + d.potential * 0.15 : base
     }
     const g = computeGroups({ shots, files: this.repo.files(), features, rank }, { ...DEFAULT_GROUPING, ...(this.options.grouping ?? {}) })
     const counts: Record<string, number> = {}
@@ -380,7 +382,14 @@ export class Project {
     const cells = shotIds.map((id, i) => {
       const s = this.repo.shot(id)
       if (s === undefined || (s.thumbPath === null && s.previewPath === null)) throw new ChengyingError('not-found', `no preview for ${id}`)
-      return { label: options.labels?.[i] ?? `#${i + 1}`, path: (options.cell ?? 360) > 400 ? (s.previewPath ?? s.thumbPath) as string : (s.thumbPath ?? s.previewPath) as string, caption: options.captions?.[i] }
+      const faceBox = this.repo.features(id)?.subject?.faceBox
+      const preferPreview = (options.cell ?? 360) > 400 || faceBox !== undefined
+      return {
+        label: options.labels?.[i] ?? `#${i + 1}`,
+        path: preferPreview ? (s.previewPath ?? s.thumbPath) as string : (s.thumbPath ?? s.previewPath) as string,
+        caption: options.captions?.[i],
+        faceBox,
+      }
     })
     const dest = this.guard.writable(this.path('sheets', `${newId('sheet')}.jpg`))
     await contactSheet(cells, dest, { columns: options.columns, cell: options.cell })
@@ -388,23 +397,22 @@ export class Project {
   }
 
   summary(): Record<string, unknown> {
-    const shots = this.repo.shots()
-    const scored = this.repo.allScores()
+    const counts = this.repo.summaryCounts()
     return {
       projectId: this.id,
       root: this.root,
       stateDir: this.stateDir,
       exportDir: this.exportDir,
-      shots: shots.length,
-      raw: shots.filter(s => s.rawFile !== null).length,
-      pairs: shots.filter(s => s.rawFile !== null && s.rasterFile !== null).length,
-      withPreview: shots.filter(s => s.previewPath !== null).length,
-      analyzed: [...scored.values()].filter(s => s.technical !== undefined).length,
-      judged: [...scored.values()].filter(s => Object.keys(s).some(k => k.startsWith('vlm:') || k === 'agent')).length,
+      shots: counts.shots,
+      raw: counts.raw,
+      pairs: counts.pairs,
+      withPreview: counts.withPreview,
+      analyzed: counts.analyzed,
+      judged: counts.judged,
       groups: Object.fromEntries((['exact', 'near', 'scene', 'segment', 'location'] as const).map(k => [k, Number(this.db.get<{ c: number }>('SELECT count(*) c FROM groups WHERE kind = ?', k)?.c ?? 0)])),
-      selections: this.repo.selections().length,
+      selections: counts.selections,
       tasks: Object.fromEntries(this.db.all<{ status: string; c: number }>('SELECT status, count(*) c FROM tasks GROUP BY status').map(r => [r.status, Number(r.c)])),
-      exports: this.repo.exports().length,
+      exports: counts.exports,
       plans: this.plans(),
       usage: this.repo.usageSummary(),
     }

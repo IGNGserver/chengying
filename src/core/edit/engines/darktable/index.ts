@@ -48,6 +48,7 @@ const STAGE_OPTIONS: ParamSchema = {
     icc_type: { type: 'string', description: 'output ICC type (darktable-cli --icc-type): SRGB, ADOBERGB, LIN_REC709, LIN_REC2020, DISPLAY, …' },
     icc_file: { type: 'string', description: 'output ICC file (must be readable)' },
     icc_intent: { type: 'string', enum: ['PERCEPTUAL', 'RELATIVE_COLORIMETRIC', 'SATURATION', 'ABSOLUTE_COLORIMETRIC'], description: 'rendering intent' },
+    opencl: { type: 'boolean', default: true, description: 'enable OpenCL GPU acceleration when available (automatically falls back to --disable-opencl on failure)' },
     conf: { type: 'object', additionalProperties: true, description: 'extra darktable configuration keys (--conf key=value), e.g. {"plugins/darkroom/workflow":"scene-referred (sigmoid)"}' },
   },
 }
@@ -63,6 +64,8 @@ export class DarktableEngine implements EngineAdapter {
   private modules = new Map<string, DtModule>()
   private mcp: DarktableMcp | undefined
   private slots: boolean[] = []
+  private readonly slotWaiters: Array<() => void> = []
+  private openclBroken = false
   private readonly cache: CatalogCache
 
   constructor(private readonly opts: { cli?: string; workDir: string; maxParallel?: number; preferMcp?: boolean }) {
@@ -346,11 +349,25 @@ export class DarktableEngine implements EngineAdapter {
 
   private async acquireSlot(signal?: AbortSignal): Promise<number> {
     while (true) {
+      signal?.throwIfAborted()
       const i = this.slots.indexOf(false)
       if (i >= 0) { this.slots[i] = true; return i }
-      signal?.throwIfAborted()
-      await new Promise(r => setTimeout(r, 150))
+      await new Promise<void>((resolve, reject) => {
+        const wake = (): void => { signal?.removeEventListener('abort', onAbort); resolve() }
+        const onAbort = (): void => {
+          const idx = this.slotWaiters.indexOf(wake)
+          if (idx >= 0) this.slotWaiters.splice(idx, 1)
+          reject(signal?.reason ?? new Error('aborted'))
+        }
+        this.slotWaiters.push(wake)
+        signal?.addEventListener('abort', onAbort, { once: true })
+      })
     }
+  }
+
+  private releaseSlot(slot: number): void {
+    this.slots[slot] = false
+    this.slotWaiters.shift()?.()
   }
 
   async render(req: RenderRequest, catalog: Catalog): Promise<RenderResult> {
@@ -374,18 +391,27 @@ export class DarktableEngine implements EngineAdapter {
       // Every path argument goes through cliPath: darktable-cli parses the
       // output argument as a pattern string and eats `\` as an escape, so a
       // Windows path would be written to a mangled name (exit code 0, no file).
-      const args = [cliPath(req.input), cliPath(xmpPath), cliPath(out), '--hq', String(opts.hq !== false), '--upscale', String(opts.upscale === true), '--apply-custom-presets', 'false']
-      if (req.maxEdge !== undefined && req.maxEdge > 0) args.push('--width', String(req.maxEdge), '--height', String(req.maxEdge))
-      if (typeof opts.style === 'string' && opts.style !== '') { args.push('--style', opts.style); if (opts.style_overwrite === true) args.push('--style-overwrite') }
-      if (typeof opts.icc_type === 'string') args.push('--icc-type', opts.icc_type)
-      if (typeof opts.icc_file === 'string') args.push('--icc-file', cliPath(opts.icc_file))
-      if (typeof opts.icc_intent === 'string') args.push('--icc-intent', opts.icc_intent)
-      args.push('--core', '--configdir', cliPath(configDir), '--library', ':memory:', '--conf', 'write_sidecar_files=never', '--disable-opencl')
-      if (req.format === 'jpeg') args.push('--conf', `plugins/imageio/format/jpeg/quality=${req.quality ?? 92}`)
-      if (req.format === 'tiff') args.push('--conf', `plugins/imageio/format/tiff/bpp=${req.bitDepth ?? 16}`, '--conf', 'plugins/imageio/format/tiff/compress=2')
-      if (req.format === 'png') args.push('--conf', `plugins/imageio/format/png/bpp=${req.bitDepth ?? 8}`)
-      for (const [k, v] of Object.entries((opts.conf ?? {}) as Record<string, unknown>)) args.push('--conf', `${k}=${String(v)}`)
-      const r = await run(install.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, cwd: req.scratchDir })
+      const baseArgs = [cliPath(req.input), cliPath(xmpPath), cliPath(out), '--hq', String(opts.hq !== false), '--upscale', String(opts.upscale === true), '--apply-custom-presets', 'false']
+      if (req.maxEdge !== undefined && req.maxEdge > 0) baseArgs.push('--width', String(req.maxEdge), '--height', String(req.maxEdge))
+      if (typeof opts.style === 'string' && opts.style !== '') { baseArgs.push('--style', opts.style); if (opts.style_overwrite === true) baseArgs.push('--style-overwrite') }
+      if (typeof opts.icc_type === 'string') baseArgs.push('--icc-type', opts.icc_type)
+      if (typeof opts.icc_file === 'string') baseArgs.push('--icc-file', cliPath(opts.icc_file))
+      if (typeof opts.icc_intent === 'string') baseArgs.push('--icc-intent', opts.icc_intent)
+      baseArgs.push('--core', '--configdir', cliPath(configDir), '--library', ':memory:', '--conf', 'write_sidecar_files=never')
+      if (req.format === 'jpeg') baseArgs.push('--conf', `plugins/imageio/format/jpeg/quality=${req.quality ?? 92}`)
+      if (req.format === 'tiff') baseArgs.push('--conf', `plugins/imageio/format/tiff/bpp=${req.bitDepth ?? 16}`, '--conf', 'plugins/imageio/format/tiff/compress=2')
+      if (req.format === 'png') baseArgs.push('--conf', `plugins/imageio/format/png/bpp=${req.bitDepth ?? 8}`)
+      for (const [k, v] of Object.entries((opts.conf ?? {}) as Record<string, unknown>)) baseArgs.push('--conf', `${k}=${String(v)}`)
+
+      const disableOpencl = opts.opencl === false || this.openclBroken
+      let args = disableOpencl ? [...baseArgs, '--disable-opencl'] : baseArgs
+      let r = await run(install.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, cwd: req.scratchDir })
+      if ((r.code !== 0 || !existsSync(out)) && !disableOpencl) {
+        this.openclBroken = true
+        if (existsSync(out)) rmSync(out)
+        args = [...baseArgs, '--disable-opencl']
+        r = await run(install.cli, args, { timeoutMs: 15 * 60_000, signal: req.signal, cwd: req.scratchDir })
+      }
       if (r.code !== 0 || !existsSync(out)) {
         throw new ChengyingError('engine-failed', `darktable-cli failed (${r.code}): ${(r.stderr || r.stdout).split('\n').slice(-12).join('\n')}`, { recipe: xmpPath })
       }
@@ -393,7 +419,7 @@ export class DarktableEngine implements EngineAdapter {
       const warnings = (r.stdout + r.stderr).split('\n').filter(l => /error|warning|failed|unsupported|could not/i.test(l) && !/opencl/i.test(l)).slice(0, 10)
       return { output: out, width: info.width ?? 0, height: info.height ?? 0, durationMs: r.durationMs, warnings, recipe: { path: xmpPath, format: 'darktable-xmp' }, command: [install.cli, ...args] }
     } finally {
-      this.slots[slot] = false
+      this.releaseSlot(slot)
     }
   }
 

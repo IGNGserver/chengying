@@ -22,7 +22,7 @@ export const EDIT_OPS_DESCRIPTION = `Array of edit operations applied atomically
 - {"op":"update_step","step_id":"…","params":{…partial…},"replace_params":false,"mask":{…}|null,"enabled":true}
 - {"op":"remove_step","step_id":"…"} · {"op":"move_step","step_id":"…","position":n}
 - {"op":"add_stage","engine":"builtin|darktable|rawtherapee|ai","position":n} · {"op":"remove_stage","stage":…} · {"op":"set_stage_options","stage":…,"options":{…}}
-- {"op":"set_source","source":"raw"|"raster"} · {"op":"import_recipe","stage":…,"text":"…xmp/pp3/dtstyle/json…"} · {"op":"reset"}
+- {"op":"set_source","source":"raw"|"raster"} · {"op":"import_recipe","stage":…,"text":"…xmp/pp3/dtstyle/json…"} · {"op":"copy_from_task","task_id":"…","include_masks":false,"include_geometry":false} · {"op":"reset"}
 ${MASK_DOC}`
 
 export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
@@ -133,12 +133,30 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
         const shot = project.repo.shot(task?.shotId as string)
         const images: ToolImage[] = []
         let note: string | undefined
-        if (args.view === true && shot?.previewPath) {
-          const r = await rt.imageForModel(shot.previewPath, exec, { caption: 'original' })
-          if (r.image) images.push(r.image)
-          note = r.reason
+        let baselineStats: unknown
+        if (args.view === true && shot !== undefined) {
+          const head = svc.head(taskId)
+          const srcFile = project.repo.file(head.doc.sourceFile)
+          const firstEngine = head.doc.stages[0]?.engine
+          let viewPath = shot.previewPath
+          let caption = 'original'
+          if (srcFile?.kind === 'raw' && firstEngine !== undefined && firstEngine !== 'builtin' && firstEngine !== 'ai') {
+            try {
+              viewPath = await svc.renderOriginal(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
+              caption = `original (${firstEngine} RAW baseline)`
+              const { imageStats } = await import('../../core/edit/service.ts')
+              baselineStats = await imageStats(viewPath)
+            } catch {
+              viewPath = shot.previewPath
+            }
+          }
+          if (viewPath) {
+            const r = await rt.imageForModel(viewPath, exec, { caption })
+            if (r.image) images.push(r.image)
+            note = r.reason
+          }
         }
-        return { ...info, photo: shot === undefined ? undefined : { id: shot.id, context: rt.shotContext(project, shot), width: shot.width, height: shot.height, raw: shot.rawFile !== null, scores: project.repo.scores(shot.id).technical?.detail, issues: project.repo.scores(shot.id).technical?.issues }, preferences: project.profile().styleNotes, look: project.profile().look, images, note }
+        return { ...info, photo: shot === undefined ? undefined : { id: shot.id, context: rt.shotContext(project, shot), width: shot.width, height: shot.height, raw: shot.rawFile !== null, previewSource: shot.previewSource, baselineStats, scores: project.repo.scores(shot.id).technical?.detail, issues: project.repo.scores(shot.id).technical?.issues }, preferences: project.profile().styleNotes, look: project.profile().look, images, note }
       },
     }),
 
@@ -246,7 +264,7 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
         if (plan?.retouch === 'none') throw new ChengyingError('conflict', 'the session plan disables retouching; update it with photo_session_start')
         if (plan?.retouch === 'generative') throw new ChengyingError('conflict', 'the session plan uses generative retouching; call photo_ai_redraw instead of edit_tasks_create/edit_run')
         const selectionId = args.selection ?? (args.shots === undefined ? project.repo.latestSelectionId() : undefined)
-        if (plan?.checkpoint === 'after-selection' && args.confirm !== true) {
+        if (plan?.checkpoint === 'after-selection' && plan.checkpointApproved !== true && args.confirm !== true) {
           const selection = selectionId === undefined ? undefined : project.repo.selection(selectionId)
           return {
             needsConfirmation: true,

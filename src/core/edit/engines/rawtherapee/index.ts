@@ -263,10 +263,10 @@ export class RawTherapeeEngine implements EngineAdapter {
 
   private async acquire(signal?: AbortSignal): Promise<number> {
     while (true) {
+      signal?.throwIfAborted()
       const i = this.slots.indexOf(false)
       if (i >= 0) { this.slots[i] = true; return i }
-      signal?.throwIfAborted()
-      await new Promise(r => setTimeout(r, 150))
+      await new Promise(r => setTimeout(r, 25))
     }
   }
 

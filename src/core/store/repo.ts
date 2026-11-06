@@ -109,6 +109,25 @@ export class Repo {
   shotCount(): number {
     return Number(this.db.get<{ c: number }>('SELECT count(*) c FROM shots')?.c ?? 0)
   }
+  summaryCounts(): { shots: number; raw: number; pairs: number; withPreview: number; analyzed: number; judged: number; selections: number; exports: number } {
+    const shotRow = this.db.get<{ shots: number; raw: number; pairs: number; withPreview: number }>(
+      'SELECT count(*) shots, sum(CASE WHEN raw_file IS NOT NULL THEN 1 ELSE 0 END) raw, sum(CASE WHEN raw_file IS NOT NULL AND raster_file IS NOT NULL THEN 1 ELSE 0 END) pairs, sum(CASE WHEN preview_path IS NOT NULL THEN 1 ELSE 0 END) withPreview FROM shots',
+    )
+    const analyzed = Number(this.db.get<{ c: number }>("SELECT count(distinct shot_id) c FROM scores WHERE source = 'technical'")?.c ?? 0)
+    const judged = Number(this.db.get<{ c: number }>("SELECT count(distinct shot_id) c FROM scores WHERE source LIKE 'vlm:%' OR source = 'agent'")?.c ?? 0)
+    const selections = Number(this.db.get<{ c: number }>('SELECT count(*) c FROM selections')?.c ?? 0)
+    const exports = Number(this.db.get<{ c: number }>('SELECT count(*) c FROM exports')?.c ?? 0)
+    return {
+      shots: Number(shotRow?.shots ?? 0),
+      raw: Number(shotRow?.raw ?? 0),
+      pairs: Number(shotRow?.pairs ?? 0),
+      withPreview: Number(shotRow?.withPreview ?? 0),
+      analyzed,
+      judged,
+      selections,
+      exports,
+    }
+  }
   saveShot(sh: Shot): void {
     const now = nowIso()
     this.db.upsert('shots', {

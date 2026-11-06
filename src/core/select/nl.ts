@@ -46,17 +46,27 @@ export const TAG_SYNONYMS: Array<[RegExp, string]> = [
 export function parseSelectionRequest(text: string): SelectionSpec {
   const t = text.trim()
   const spec: SelectionSpec = { request: t }
-  const count = /(?:选|挑|精选|保留|留|pick|select|choose|keep|top)\s*(?:出|个|上)?\s*([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|个|photos?|images?|pictures?|shots?)?/i.exec(t)
-    ?? /([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|photos?|images?|pictures?|shots?)/i.exec(t)
+  // Strip non-quantity phrases ("同一张", "每一张", "不要一张", etc.) before matching count.
+  const countCleaned = t
+    .replace(/(?:同|每|哪|第|最后|任|某|这|那|不|没)\s*一\s*[张幅个]/g, '')
+    .replace(/(?:不要|别留|排除|去掉)\s*[0-9零〇一二两三四五六七八九十百千]+\s*[张幅个]/g, '')
+  const count = /(?:选|挑|精选|保留|留|pick|select|choose|keep|top)\s*(?:出|个|上)?\s*([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|个|photos?|images?|pictures?|shots?)?/i.exec(countCleaned)
+    ?? /([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|photos?|images?|pictures?|shots?)/i.exec(countCleaned)
   const unlimited = /不限|不限制|所有(?:好|优秀|合格)|全部(?:好|优秀|合格)|any number|no limit|all (?:good|great|keepers)/i.test(t)
   if (count !== null && !unlimited) {
     const n = parseChineseNumber(count[1] as string)
     if (n !== undefined && n > 0) spec.count = n
   }
+  const starThreshold = /([1-5])\s*(?:星|stars?)\s*(?:以上|\+|及以上)?/i.exec(t)
   const threshold = /(?:质量|分数|评分|得分|score|quality)\s*(?:高于|大于|超过|不低于|>=|>|at least|above|over)?\s*([0-9]{1,3})\s*(?:分|以上|\+)?/i.exec(t)
-    ?? /([0-9]{1,3})\s*分以上/.exec(t)
-  if (threshold !== null) spec.minScore = Math.min(100, Number(threshold[1]))
-  else if (spec.count === undefined) {
+    ?? /([0-9]{1,3})\s*分(?:以上|及以上|\+)/.exec(t)
+  if (starThreshold !== null) {
+    spec.minScore = Math.min(95, Number(starThreshold[1]) * 18)
+  } else if (threshold !== null) {
+    const rawVal = Number(threshold[1])
+    // Normalize 5-point scale ("4分以上全要") to 0-100 scale instead of a floor of 4/100.
+    spec.minScore = rawVal >= 1 && rawVal <= 5 ? rawVal * 18 : Math.min(100, rawVal)
+  } else if (spec.count === undefined) {
     if (/高质量|最好|最佳|精品|顶级|best|excellent|outstanding/i.test(t)) spec.minScore = 78
     else if (unlimited || /合格|能用|usable|decent/i.test(t)) spec.minScore = 62
   }
@@ -72,8 +82,18 @@ export function parseSelectionRequest(text: string): SelectionSpec {
   for (const [re, tag] of TAG_SYNONYMS) {
     const m = re.exec(t)
     if (m === null) continue
-    const before = t.slice(Math.max(0, m.index - 4), m.index)
-    if (/不要|别|排除|去掉|no |without|exclude/i.test(before)) avoid.push(tag)
+    const prefix = t.slice(0, m.index)
+    const clauseBreak = Math.max(
+      prefix.lastIndexOf(','),
+      prefix.lastIndexOf('，'),
+      prefix.lastIndexOf('.'),
+      prefix.lastIndexOf('。'),
+      prefix.lastIndexOf(';'),
+      prefix.lastIndexOf('；'),
+      prefix.lastIndexOf('但'),
+    )
+    const clauseBefore = prefix.slice(clauseBreak + 1)
+    if (/不要|别|排除|去掉|少要|少留|不含|除了|no |without|exclude|avoid|fewer /i.test(clauseBefore)) avoid.push(tag)
     else prefer.push(tag)
   }
   if (prefer.length > 0) spec.preferTags = prefer

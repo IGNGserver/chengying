@@ -14,6 +14,8 @@ import { mergeDims } from '../core/select/selector.ts'
 import { parseSelectionRequest } from '../core/select/nl.ts'
 import { isInside } from '../core/fsguard.ts'
 import { ChengyingError, errorMessage, isChengyingError } from '../core/util/errors.ts'
+import { nowIso } from '../core/util/misc.ts'
+import { writePlan, type PlanStage, type SessionPlan } from './plan.ts'
 import type { Project } from '../core/project.ts'
 
 export interface ApiRequest {
@@ -106,6 +108,12 @@ export class ApiRouter {
 
 export function buildRouter(rt: ChengyingRuntime): ApiRouter {
   const P = (id: string): Project => rt.project(id)
+  const syncLatestPlan = (project: Project, patch: Partial<Pick<SessionPlan, 'stage' | 'checkpointApproved'>>): SessionPlan | undefined => {
+    const latest = project.plans().at(-1) as SessionPlan | undefined
+    if (latest === undefined || typeof latest.sessionId !== 'string') return undefined
+    const next: SessionPlan = { ...latest, ...patch, updatedAt: nowIso() }
+    return writePlan(project, next)
+  }
   const router = new ApiRouter()
   router
     .add('GET', '/projects', async () => ({ projects: [...rt.projects.values()].map(p => p.summary()), recent: rt.recent().filter(r => !rt.projects.has(r.id) && existsSync(r.root)) }))
@@ -137,6 +145,7 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
             vlm = { skipped: true, error: errorMessage(error) }
           }
         }
+        syncLatestPlan(project, { stage: 'culled' as PlanStage })
         return { scan, previews: { built: previews.built, failed: previews.failed.length }, analyze: { analyzed: analyze.analyzed, failed: analyze.failed.length }, vlm }
       })
       return { activityId: a.id }
@@ -204,7 +213,14 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
       const body = (req.body ?? {}) as { request?: string; count?: number; minScore?: number; base?: string; name?: string }
       const spec = { ...(body.request ? parseSelectionRequest(body.request) : {}), ...(body.count !== undefined ? { count: body.count } : {}), ...(body.minScore !== undefined ? { minScore: body.minScore } : {}) }
       const { selectionId, result } = project.select(spec, { name: body.name, base: body.base })
+      syncLatestPlan(project, { stage: 'selected' as PlanStage })
       return { selectionId, stats: result.stats, spec }
+    })
+    .add('POST', '/p/:id/plan/approve-selection', async (p) => {
+      const project = P(p.id as string)
+      const plan = syncLatestPlan(project, { checkpointApproved: true, stage: 'selected' as PlanStage })
+      project.repo.addEvent(null, 'info', 'plan', 'selection checkpoint approved in web panel', { plan: plan?.id })
+      return { approved: true, plan }
     })
     .add('POST', '/p/:id/selection/:sel/adjust', async (p, req) => {
       const body = (req.body ?? {}) as { add?: string[]; remove?: string[]; lock?: string[]; unlock?: string[] }

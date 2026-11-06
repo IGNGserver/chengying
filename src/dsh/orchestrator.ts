@@ -25,6 +25,56 @@ export const CHILD_GLOBAL_TOOLS = ['edit_engines', 'edit_capabilities', 'edit_de
 
 interface Child { projectId: string; taskId: string }
 
+export function engineCheatSheet(engines: readonly string[]): string {
+  const unique = [...new Set(engines)]
+  const blocks: string[] = []
+  if (unique.includes('builtin')) {
+    blocks.push(
+      `Core "builtin" operations (exact schemas — use directly in edit_apply without calling edit_describe):
+  - exposure: { ev: -6..6 (default 0, typical step ±0.15..1.0) } (maskable)
+  - white_balance: { temperature: -100..100 (0, +warmer), tint: -100..100 (0, +magenta) } (maskable)
+  - tone: { contrast: -100..100 (0), highlights: -100..100 (0), shadows: -100..100 (0), whites: -100..100 (0), blacks: -100..100 (0) } (maskable)
+  - curve: { points?: [[x,y],...], red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...] } (x,y in 0..1) (maskable)
+  - saturation: { saturation: -100..100 (0), vibrance: -100..100 (0) } (maskable)
+  - hsl: { red|orange|yellow|green|aqua|blue|purple|magenta: { hue?: -180..180, saturation?: -100..100, luminance?: -100..100 } } (maskable)
+  - clarity: { amount: -100..100 (0), radius?: 1..100 (24) } · dehaze: { amount: -100..100 (0) } (maskable)
+  - denoise: { luminance?: 0..100 (25), chroma?: 0..100 (35) } · sharpen: { amount?: 0..300 (80), radius?: 0.3..5 (1), threshold?: 0..20 (2) } (maskable)
+  - vignette: { amount: -100..100 (-25), midpoint?: 0.1..0.9 (0.5), feather?: 0.05..1 (0.45) } (maskable)
+  - rotate: { angle: -45..45 (deg, +clockwise), auto_crop?: true } · crop: { x?: 0..0.95, y?: 0..0.95, w?: 0.05..1, h?: 0.05..1, aspect?: "free"|"original"|"1:1"|"3:2"|"2:3"|"4:3"|"3:4"|"16:9"|"9:16" } · perspective: { vertical?: -100..100, horizontal?: -100..100 } (geometry ops: applied in step order, no mask)`,
+    )
+  }
+  if (unique.includes('darktable')) {
+    blocks.push(
+      `Core "darktable" operations (scene-referred workflow — prefer these modern modules; avoid stacking legacy basecurve/levels/shadhi on top):
+  - exposure: { exposure: -4..4 (EV, default 0), black?: -0.1..0.1 (0) } (maskable)
+  - colorbalancergb: { chroma_global?: -1..1 (0), vibrance?: -1..1 (0), contrast?: -1..1 (0), saturation_global?: -1..1 (0), brilliance_shadows?: -1..1 (0), brilliance_midtones?: -1..1 (0), brilliance_highlights?: -1..1 (0) } (maskable)
+  - tonecurve: { curves: { L?: [[0,0],[0.25,0.22],[0.75,0.78],[1,1]], a?: [...], b?: [...] } } (high-level spline points in 0..1, maskable)
+  - rgbcurve: { curves: { master?: [[0,0],...,[1,1]], r?: [...], g?: [...], b?: [...] } } (maskable)
+  - sigmoid: { middle_grey_contrast?: 0.1..10 (1.5), contrast_skewness?: -1..1 (0) }
+  - crop: { left: 0..1 (0), top: 0..1 (0), right: 0..1 (1), bottom: 0..1 (1) } (no mask)
+  - ashift: { rotation: -45..45 (deg), lensshift_v?: -1..1 (0), lensshift_h?: -1..1 (0) }`,
+    )
+  }
+  if (unique.includes('rawtherapee')) {
+    blocks.push(
+      `Core "rawtherapee" operations (pp3 sections — partial params merge over the base profile; local edits MUST use "Locallab" spots[], never step.mask):
+  - Exposure: { Auto?: false, Compensation?: -5..5 (EV), Brightness?: -100..100, Contrast?: -100..100, Saturation?: -100..100, HighlightCompr?: 0..100, ShadowCompr?: 0..100 }
+  - White Balance: { Setting?: "Camera"|"Auto"|"Custom", Temperature?: 1500..60000, Green?: 0.02..10 }
+  - Shadows & Highlights: { Enabled: true, Highlights?: 0..100, Shadows?: 0..100 }
+  - Crop: { Enabled: true, X: 0..1, Y: 0..1, W: 0..1, H: 0..1 } · Rotation: { Degrees: -45..45 }`,
+    )
+  }
+  if (unique.includes('ai')) {
+    blocks.push(
+      `Core "ai" stage operations:
+  - upscale: { scale?: 1..4 (2), method?: "auto"|"lanczos"|"model" }
+  - inpaint: { radius?: 1..40 (6), grow?: 0..0.05 (0.003) } (requires mask.shapes marking wires/dust/small distractions)
+  - style_match: { fingerprint: <from edit_style_reference>, strength?: 0..1 (0.6), color?: true, tone?: true }`,
+    )
+  }
+  return blocks.join('\n')
+}
+
 export class EditOrchestrator {
   private readonly children = new Map<string, Child>()
   private readonly active = new Map<string, { activation?: SubagentActivation; abort: AbortController; childId: string }>()
@@ -40,6 +90,7 @@ export class EditOrchestrator {
       const agent = 'agent' in payload && payload.agent !== undefined && typeof (payload as { agent: AgentLike }).agent === 'object' ? (payload as { agent: AgentLike }).agent : payload as AgentLike
       const child = this.children.get(String(agent.id))
       if (child === undefined) return
+      if (agent.session?.id !== undefined) this.children.set(String(agent.session.id), child)
       try {
         const scoped = agent.ctx.tools
         const tools = [...taskTools(this.rt, child), ...this.childToolFactories.flatMap(f => f(child))]
@@ -91,9 +142,12 @@ export class EditOrchestrator {
     if (anchor === undefined || anchor.headRevision === null) return undefined
     const rev = project.repo.revision(anchor.headRevision)
     if (rev === undefined) return undefined
-    const stepSummary = rev.doc.stages.flatMap(st => st.steps.filter(s => s.enabled).map(s => `${st.engine}:${s.op}(${JSON.stringify(s.params).slice(0, 80)})`)).slice(0, 6)
+    const stepSummary = rev.doc.stages.flatMap(st => st.steps.filter(s => s.enabled).map(s => `${st.engine}:${s.op}(${JSON.stringify(s.params).slice(0, 120)})`)).slice(0, 8)
     const note = stepSummary.length === 0 ? 'kept unchanged (original look already balanced)' : stepSummary.join(', ')
-    return `Scene consistency (${sceneId}): sibling anchor photo ${anchor.shotId} (task ${anchor.id}) finished with [${note}]. Keep colour temperature, contrast and overall mood cohesive with it (you can inspect its style fingerprint via edit_style_reference with shot="${anchor.shotId}") while tailoring exposure, crop and local masks to this specific photo.`
+    const copyHint = stepSummary.length === 0
+      ? ''
+      : ` You can inherit its global grading steps in one call with edit_apply ops: [{"op":"copy_from_task","task_id":"${anchor.id}"}], then fine-tune only exposure/crop/masks for this frame.`
+    return `Scene consistency (${sceneId}): sibling anchor photo ${anchor.shotId} (task ${anchor.id}) finished with [${note}]. Keep colour temperature, contrast and overall mood cohesive with it (you can inspect its style fingerprint via edit_style_reference with shot="${anchor.shotId}") while tailoring exposure, crop and local masks to this specific photo.${copyHint}`
   }
 
   prompt(project: Project, task: TaskRecord): string {
@@ -102,6 +156,7 @@ export class EditOrchestrator {
     const profile = project.profile()
     const resumed = head.doc.stages.some(s => s.steps.length > 0)
     const engines = head.doc.stages.map((s, i) => `${i}:${s.engine}`).join(' → ')
+    const cheatSheet = engineCheatSheet(head.doc.stages.map(s => s.engine))
     const tech = project.repo.scores(task.shotId).technical
     return `You are a professional photo retoucher. You work on exactly one photo (task ${task.id}) with tools bound to it.
 
@@ -111,14 +166,14 @@ Pipeline stages: ${engines}${resumed ? `\nThis task is being RESUMED: the curren
 
 User brief: ${task.instructions}
 ${typeof task.options.sceneBrief === 'string' && task.options.sceneBrief !== '' ? `Scene-specific brief (${String(task.options.sceneId ?? task.options.segmentId ?? 'scene')}): ${task.options.sceneBrief}\n` : ''}${this.sceneAnchorContext(project, task) ? `${this.sceneAnchorContext(project, task)}\n` : ''}${profile.styleNotes.length > 0 ? `User taste (learned/stated): ${profile.styleNotes.join(' · ')}\n` : ''}${Object.keys(profile.look).length > 0 ? `Preferred look targets (−1..1): ${JSON.stringify(profile.look)}\n` : ''}Budget: at most ${typeof task.options.maxRevisions === 'number' ? task.options.maxRevisions : this.rt.config.editing.maxRevisionsPerTask} edit_apply iterations; stop as soon as the photo looks natural.
-
+${cheatSheet ? `\n${cheatSheet}\n` : ''}
 How to work:
-1. edit_task_info (view=true) to see the photo, its recipe and history. If the original photo is ALREADY well-exposed, balanced and atmospheric so any cropping or grading would only degrade it, do NOT force edits — call edit_finish with status="unchanged" explaining why keeping the original is best.
-2. Find operations with edit_capabilities and read exact parameter schemas with edit_describe before using them — never guess parameter names or ranges.
-3. Edit with edit_apply (it renders a preview and statistics: check histogram/clipping, colour cast, horizon, noise). Typical order: white balance & exposure → tone (highlights/shadows/contrast) → colour → local adjustments with masks → geometry (straighten/crop/perspective) → noise reduction & sharpening.
+1. edit_task_info (view=true) to see the photo (for RAW tasks, the engine baseline is shown alongside stats), its recipe and history. If the original photo is ALREADY well-exposed, balanced and atmospheric so any cropping or grading would only degrade it, do NOT force edits — call edit_finish with status="unchanged" explaining why keeping the original is best.
+2. For core operations listed above, use their exact parameter schemas directly in edit_apply. Only call edit_capabilities / edit_describe when you need an unlisted module — never guess parameter names or ranges.
+3. Edit with edit_apply (it renders a preview and statistics: keep clipHigh < 0.8% unless sky blowout is unrecoverable, keep clipLow < 2.0%, and prefer moderate incremental steps). Typical order: white balance & exposure → tone (highlights/shadows/contrast) → colour → local adjustments with masks → geometry (straighten/crop/perspective) → noise reduction & sharpening.
 4. Look at every result; compare with the original (edit_preview compare=true). Revert with edit_revert when a change makes things worse.
 5. Keep the photo natural and true to the scene. Optional AI stage (add_stage engine "ai"): ai:upscale (super-resolution), ai:inpaint (remove small distractions/dust/wires with a mask, non-generative), ai:style_match (match a reference look; fingerprint from edit_style_reference). Generative changes only through edit_generate, which asks for the user's authorization; if it is refused or unavailable, continue without them.
-6. Finish with edit_finish, summarizing what you changed and why (status="unchanged" to keep the original untouched, or status="failed" with a reason if the photo cannot be rescued).`
+6. Finish with edit_finish, summarizing what you changed and why in the language of the user brief (status="unchanged" to keep the original untouched, or status="failed" with a reason if the photo cannot be rescued).`
   }
 
   async control(project: Project, taskId: string, action: 'pause' | 'resume' | 'retry' | 'cancel'): Promise<Record<string, unknown>> {
@@ -160,8 +215,25 @@ How to work:
     if (parent === undefined) throw new ChengyingError('unsupported', 'no parent agent')
     const sem = new Semaphore(Math.max(1, opts.concurrency ?? this.rt.config.editing.maxConcurrent))
     const wanted = opts.taskIds === undefined ? undefined : new Set(opts.taskIds)
-    const pick = (): TaskRecord[] => project.repo.tasks({ status: ['queued'], selectionId: opts.selectionId }).filter(t => (wanted === undefined || wanted.has(t.id)) && !this.active.has(t.id))
-    const total = pick().length
+    const candidates = (): TaskRecord[] => project.repo.tasks({ status: ['queued'], selectionId: opts.selectionId }).filter(t => (wanted === undefined || wanted.has(t.id)) && !this.active.has(t.id))
+    const pick = (): TaskRecord[] => {
+      const queued = candidates()
+      if (queued.length <= 1) return queued
+      // Scene barrier: while a scene's anchor task is still queued or running,
+      // hold back follower tasks of the same scene so they can inherit the
+      // completed anchor's look once it finishes.
+      const pendingAnchorScenes = new Set<string>()
+      for (const t of project.repo.tasks({ status: ['queued', 'running'], selectionId: opts.selectionId })) {
+        if (wanted !== undefined && !wanted.has(t.id)) continue
+        if (t.options.sceneAnchor === true && typeof t.options.sceneId === 'string') {
+          pendingAnchorScenes.add(t.options.sceneId)
+        }
+      }
+      if (pendingAnchorScenes.size === 0) return queued
+      const unblocked = queued.filter(t => t.options.sceneAnchor === true || typeof t.options.sceneId !== 'string' || !pendingAnchorScenes.has(t.options.sceneId))
+      return unblocked.length > 0 ? unblocked : (this.active.size === 0 ? queued : [])
+    }
+    const total = candidates().length
     let processed = 0
     const running = new Set<Promise<void>>()
     while (!opts.signal.aborted) {
@@ -218,6 +290,10 @@ How to work:
       outcome = { stopReason: result.stopReason, text: result.output.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('\n').slice(0, 2000), diagnostic: result.diagnostic }
     } catch (error) {
       outcome = { stopReason: signal.aborted ? 'aborted' : 'error', text: '', diagnostic: errorMessage(error) }
+    } finally {
+      for (const [k, v] of this.children) {
+        if (v.taskId === task.id) this.children.delete(k)
+      }
     }
     const now = project.repo.task(task.id) as TaskRecord
     project.repo.addEvent(task.id, 'info', 'agent-result', `sub-agent ended: ${outcome.stopReason}${outcome.text ? ` — ${outcome.text.slice(0, 300)}` : ''}`, { childId, diagnostic: outcome.diagnostic })
