@@ -46,6 +46,8 @@ DSH 的 agent preset 是会话级组合：新建任务时选择，决定该会�
 
 Web 的 web-app patch 会禁用全局模型工具行（bash、fs、jobs、subagent 等），每个预设必须自己列出完整工具面。澄影预设因此在摄影工具之外显式挂载通用工具：bash/pwsh、jobs、present、subagent/subagent_fork、workflow、skill、goal、schedule、plan-mode。Host 行额外做两件事：注册 `shell-env` 的 `DSH_CHENGYING_*` 变量，以及把随包 skill 注册进 `ctx.skills`。这些是叠加，不是替换。
 
+预设是**一棵 Loader 子树**：`mountPreset()` 会审计每一行，任意一行导入或激活失败就整体拒绝。宿主在不同 minor 之间会重划自己的工具行（例如 0.2.2 把 `dsh-tool-subagent-control/list-agents` 并进主入口并删掉该子路径导出），而预设里写死了行名。所以**凡是写包子路径的行都必须带 `disabled: !!js` 守卫**：运行时按 `ctx.baseUrl` 解析该子路径，解析不到就跳过本行。`tests/preset-shape.test.ts` 守着这条规则。失败现象与取证见 [`troubleshooting.md`](troubleshooting.md)。
+
 预设只决定工具与提示词组合，不是安全沙箱；`FsGuard` 约束摄影工具，shell 不受它约束（见“安全边界”）。
 
 ## 会话计划

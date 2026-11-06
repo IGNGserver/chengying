@@ -82,7 +82,7 @@ Windows 上的几条硬约束（0.4.2 起已处理，CI 有独立 Windows job）
 
 ## 安装
 
-需要 Node.js ≥ 24.9 与 DeepSeek Harness ≥ 0.2.1（`dsh-agent-preset`）。darktable、RawTherapee 是**可选**依赖：未安装时筛图与内置引擎照常可用。
+需要 Node.js ≥ 24.9 与 DeepSeek Harness `>=0.2.1-0 <0.3.0`（`dsh-agent-preset`）。**0.2.1.x 与 0.2.2.x 都已验证**：两者对宿主工具行的划法不同（0.2.2 把 `@deepseek-ai/dsh-tool-subagent-control/list-agents` 并进了主入口），预设里的子路径行都带运行时守卫，缺了只跳过该行，不至于拖垮整个预设。darktable、RawTherapee 是**可选**依赖：未安装时筛图与内置引擎照常可用。
 
 ```bash
 pnpm install
@@ -102,6 +102,8 @@ dsh plugin --profile web add ./chengying-<version>.tgz
 ```
 
 插件会向 DSH 的新任务预设列表注册 **“澄影 · 摄影后期”**。新建对话时选择它，才会加载 30 多个摄影工具、摄影工作流和一组通用工具（shell、后台任务、子 Agent、技能、交付卡等）；普通 DSH 会话不会被摄影工具污染。右侧栏的“澄影”面板是进度与结果监视器，只在有澄影会话/工作区时才有内容。
+
+> 预设选单里没有它、或者选中后报“预设加载失败”，按 [`docs/troubleshooting.md`](docs/troubleshooting.md) 的「预设」一节三步定位：宿主版本 → bundle 是否被跳过 → 是哪一行挂载失败。
 
 > 预设只决定工具与提示词组合，不是安全沙箱。摄影工具受 `FsGuard` 约束，原图只读；shell 是宿主能力，用 `photo_integrity_check` 的扫描基线来**发现**越界，而不是假装拦住它。详见“通用能力”一节。
 
