@@ -2,7 +2,7 @@
 
 澄影是 **DeepSeek Harness（DSH）** 的 AI 摄影后期插件，面向旅行、活动等大批量照片，把"筛图 → 专业修图 → 高级智能后期 → 导出"做成 Agent 可以端到端执行、用户可以随时查看和接管的工作流。
 
-- **原图只读**：所有处理都写在插件自己的状态目录与导出目录，原始文件永不修改、移动或删除（`FsGuard` 强制）。
+- **原图只读**：所有摄影工具的处理都写在插件自己的状态目录与导出目录，原始文件永不修改、移动或删除（`FsGuard` 强制）；挂载 shell 后额外用扫描基线做完整性校验（`photo_integrity_check`），交付前自动复查。
 - **非破坏、可恢复**：每次修改都生成一个不可变修订（revision），可撤销、回到任意历史版本；任务中断后从最新修订继续。
 - **专业引擎全接口**：darktable、RawTherapee 的全部模块/参数由插件从已安装的引擎**自动发现**，以 JSON Schema 暴露给 Agent，而不是一组预设。
 - **真实性优先**：生成式修改必须经用户授权，导出文件会被标注为含 AI 生成内容。
@@ -101,15 +101,43 @@ dsh plugin --profile web add ./chengying-<version>.tgz
         mode: both          # headless/direct patch: host + agent in one row
 ```
 
-插件会向 DSH 的新任务预设列表注册 **“澄影 · 摄影后期”**。新建对话时选择它，才会加载 36 个摄影工具和摄影工作流；普通 DSH 会话不会被摄影工具污染。右侧栏的“澄影”面板是进度与结果监视器，只在有澄影会话/工作区时才有内容。
+插件会向 DSH 的新任务预设列表注册 **“澄影 · 摄影后期”**。新建对话时选择它，才会加载 30 多个摄影工具、摄影工作流和一组通用工具（shell、后台任务、子 Agent、技能、交付卡等）；普通 DSH 会话不会被摄影工具污染。右侧栏的“澄影”面板是进度与结果监视器，只在有澄影会话/工作区时才有内容。
 
-> 预设只决定工具与提示词组合，不是安全沙箱；原图只读仍由 `FsGuard` 强制。
+> 预设只决定工具与提示词组合，不是安全沙箱。摄影工具受 `FsGuard` 约束，原图只读；shell 是宿主能力，用 `photo_integrity_check` 的扫描基线来**发现**越界，而不是假装拦住它。详见“通用能力”一节。
 
 ### 不使用预设
 
 - Web 中想恢复旧行为：把 Host 行 `config.mode` 设为 `both`，所有会话都会带上摄影工具。
 - Headless / 自己的 `--patch`：没有 preset roster，`mode: auto` 会自动退化为 `both`，无需额外配置。
 - 只想用 CLI：`chengying cull/select/status/engines` 不依赖 DSH 预设。
+
+### 通用能力：shell 与自主排查
+
+澄影预设除了摄影工具，还挂载宿主通用工具。插件工具覆盖不到的问题，模型可以自己查：
+
+- `bash` / `pwsh`：检查引擎是否安装、版本与路径，跑 exiftool / ffmpeg / ImageMagick / vips / rsync / zip，写一次性脚本，读日志。Windows 走 PowerShell。
+- `job_output` / `job_list` / `job_kill`：长命令用 `run_in_background` 放后台，不阻塞会话。
+- `subagent` / `subagent_fork`：把读目录、翻错误日志、查资料、批量核验交给子 Agent；需要当前对话上下文时用 fork。
+- `present`：把 zip、报告、联系表作为交付卡片直接打开。
+- `skill`：按需加载 `chengying-batch-ops`（批量命令配方）与 `chengying-engine-troubleshoot`（引擎排障）。
+- `goal`、`workflow`、`schedule`、计划模式：长期任务、批量编排与跨轮目标。
+
+shell 里有四个托管变量（每次调用由宿主按当前会话工作区注入，不落盘）：
+
+| 变量 | 指向 |
+|---|---|
+| `DSH_CHENGYING_PROJECT` | 照片工作区（原图目录，只读） |
+| `DSH_CHENGYING_STATE` | 插件状态目录 |
+| `DSH_CHENGYING_SCRATCH` | 临时脚本与中间文件 |
+| `DSH_CHENGYING_EXPORT` | 默认交付目录 |
+
+边界：
+
+- 修图仍走 `edit_*`，生成不可变修订；shell 直接改图不进修订，也不会被交付系统识别。
+- 原图目录不要用 shell 做 `mv` / `rm` / 覆盖写 / 写 sidecar；需要副本时先复制到 scratch。
+- 生成式修改仍必须经 `gen_authorize` / 用户审批；用 shell 调外部生成模型绕过授权是模型不该做的事。
+- 扫描时记录原图基线（size/mtime；`hash=true` 时补全 SHA-256）。`photo_integrity_check` 随时可查；`photo_deliver` 会自动做一次快速检查，`originalsIntact=false` 表示原图已变化。
+- 编辑子 Agent 仍然只拿任务绑定工具，看不到 shell（`restrict` 在子 Agent 作用域上执行）。
 
 ### 一个典型的澄影会话
 
@@ -147,7 +175,9 @@ Agent：photo_session_start({ ..., retouch: "generative" })
 
 - `mode: "originals"`：只筛图时复制入选原图（`source: raster | raw | both`），字节不变。
 - `mode: "rendered"`：全分辨率渲染，复制并校验元数据，`_recipes/` 保存 JSON 与 XMP/pp3。
-- 默认写 `manifest.json`：计划、selection、每张的源/输出/修订、是否含生成式内容、失败项。
+- 默认写 `manifest.json`：计划、selection、每张的源/输出/修订、是否含生成式内容、失败项、原图完整性。
+- 每次交付前自动做一次原图基线快速检查，结果带 `originalsIntact` / `originalsChanged` / `originalsMissing`；manifest 的 `summary` 同步记录。
+- `archive: true` 会在交付目录旁写同名 `.zip`（store-only，照片本身已压缩；单次交付超过 4 GiB 会提示改用 shell 的 zip/tar）。
 - `dir` 可以是任意可写目录；工具会把它加入本次任务的可写根，扫描时会跳过输出目录。
 - 交付目录默认沿用会话计划；再次调用 `photo_session_start({ output_dir })` 可以改。
 

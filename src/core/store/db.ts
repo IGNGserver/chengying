@@ -70,6 +70,21 @@ const MIGRATIONS: string[] = [
   );
   CREATE TABLE feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id TEXT, selection_id TEXT, label INTEGER, features_json TEXT, ts TEXT);
   `,
+  // v2 — original-file integrity baseline. Chengying's own tools are confined
+  // by FsGuard, but a mounted shell runs outside it; record the scan-time
+  // size/mtime/full-hash so a later check can prove an original was untouched.
+  `
+  CREATE TABLE originals_baseline (
+    file_id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ms INTEGER NOT NULL,
+    sha256 TEXT,
+    captured_at TEXT NOT NULL,
+    source TEXT NOT NULL
+  );
+  CREATE INDEX originals_baseline_path ON originals_baseline(path);
+  `,
 ]
 
 export type Row = Record<string, SQLInputValue>

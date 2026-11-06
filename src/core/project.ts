@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Db } from './store/db.ts'
 import { Repo } from './store/repo.ts'
+import { IntegrityService } from './integrity.ts'
 import { FsGuard } from './fsguard.ts'
 import { MetadataService } from './meta/exif.ts'
 import { scanWorkspace, type ScanProgress, type ScanResult } from './scan/scanner.ts'
@@ -57,6 +58,7 @@ export class Project {
   exportDir: string
   readonly db: Db
   readonly repo: Repo
+  readonly integrity: IntegrityService
   guard: FsGuard
   readonly metadata: MetadataService
   readonly features: FeaturePool
@@ -79,6 +81,11 @@ export class Project {
     for (const d of ['previews', 'thumbs', 'scratch', 'renders', 'sheets', 'recipes', 'engines']) mkdirSync(join(this.stateDir, d), { recursive: true })
     this.db = new Db(join(this.stateDir, 'chengying.db'))
     this.repo = new Repo(this.db)
+    this.integrity = new IntegrityService(this)
+    // Upgrade path: a project scanned by an older Chengying already has the
+    // scan-time size/mtime in `files`; seed the baseline from that record
+    // instead of accepting whatever the originals look like at open time.
+    this.integrity.capture()
     this.db.setMeta('root', root)
     this.db.setMeta('exportDir', this.exportDir)
     this.guard = new FsGuard({
@@ -143,6 +150,7 @@ export class Project {
       signal: opts.signal,
       onProgress: (p: ScanProgress) => opts.onProgress?.({ stage: `scan:${p.phase}`, done: p.done, total: p.total, message: p.current }),
     })
+    this.integrity.capture()
     this.repo.addEvent(null, 'info', 'scan', `scanned ${result.files} files → ${result.shots} shots (${result.pairs} RAW+JPEG pairs)`, result)
     return result
   }

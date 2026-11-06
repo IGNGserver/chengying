@@ -60,6 +60,9 @@ describe.skipIf(!enabled)('DSH e2e · phase 2 retouching with editing sub-agents
     for (const r of results) expect(r.isError, r.text.slice(0, 400)).toBe(false)
 
     // Sub-agents: one conversation per task, task-bound tools only, no shell/filesystem tools.
+    // The main agent keeps the host shell; the restriction must not leak it to children.
+    const mainTools = new Set(llm.requests.find(r => r.tools.some(t => t.name === 'photo_workspace_open'))?.tools.map(t => t.name))
+    expect(mainTools.has('bash')).toBe(true)
     const childTools = new Set(childRequests[0]?.tools.map(t => t.name))
     if (childTools.has('bash') || !childTools.has('edit_apply')) console.log('CHILD TOOLS', [...childTools].join(','), '\nSTDERR', run.stderr.slice(-3000))
     expect(childTools.has('edit_apply')).toBe(true)

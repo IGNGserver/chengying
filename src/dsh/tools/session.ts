@@ -154,9 +154,10 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
       c2pa?: boolean
       overwrite?: boolean
       background?: boolean
+      archive?: boolean
     }>({
       name: 'photo_deliver',
-      description: 'Deliver the result to a directory. originals copies the picked source files byte-for-byte (cull-only); rendered exports every shot at full resolution with metadata verification and _recipes/ sidecars. Writes manifest.json unless manifest=false. Defaults to the session plan outputDir/deliverMode.',
+      description: 'Deliver the result to a directory. originals copies the picked source files byte-for-byte (cull-only); rendered exports every shot at full resolution with metadata verification and _recipes/ sidecars. Writes manifest.json unless manifest=false. Runs a quick original-integrity check and reports originalsIntact; archive=true also writes a store-only .zip next to the delivery directory. Defaults to the session plan outputDir/deliverMode.',
       parameters: obj({
         project: projectArg,
         selection: str('Selection id (default: latest).'),
@@ -175,13 +176,14 @@ export function sessionTools(rt: ChengyingRuntime): ToolDefinition[] {
         c2pa: bool('For rendered mode: write a C2PA content-credentials manifest and sign with c2patool when available.'),
         overwrite: bool('Replace this project’s earlier export with the same name (default true).'),
         background: bool('Run as a background job.'),
+        archive: bool('Also write a store-only .zip next to the delivery directory.'),
       }),
       async run(args, exec) {
         const project = P(args, exec)
         return await runDelivery(rt, project, exec, {
           selection: args.selection, tasks: args.tasks, shots: args.shots, dir: args.dir, mode: args.mode,
           manifest: args.manifest, format: args.format, quality: args.quality, maxEdge: args.max_edge,
-          subdir: args.subdir, naming: args.naming, source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background,
+          subdir: args.subdir, naming: args.naming, source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background, archive: args.archive,
         })
       },
     }),

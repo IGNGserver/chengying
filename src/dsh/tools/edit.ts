@@ -309,9 +309,9 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
       },
     }),
 
-    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; dir?: string; mode?: 'originals' | 'rendered'; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; source?: 'raster' | 'raw' | 'both'; include_raw?: boolean; c2pa?: boolean; manifest?: boolean; overwrite?: boolean; background?: boolean }>({
+    defineTool<{ project?: string; selection?: string; tasks?: string[]; shots?: string[]; dir?: string; mode?: 'originals' | 'rendered'; format?: string; quality?: number; max_edge?: number; subdir?: string; naming?: string; source?: 'raster' | 'raw' | 'both'; include_raw?: boolean; c2pa?: boolean; manifest?: boolean; overwrite?: boolean; background?: boolean; archive?: boolean }>({
       name: 'export_run',
-      description: 'Low-level export: rendered photos (default: latest selection; edited from their latest revision, unedited from the engine default) at full resolution with metadata verification and _recipes/, or originals copied byte-for-byte. Prefer photo_deliver for a plan-driven delivery; export_run supports the same dir/mode/manifest arguments.',
+      description: 'Low-level export: rendered photos (default: latest selection; edited from their latest revision, unedited from the engine default) at full resolution with metadata verification and _recipes/, or originals copied byte-for-byte. Prefer photo_deliver for a plan-driven delivery; export_run supports the same dir/mode/manifest/archive arguments and reports originalsIntact.',
       parameters: obj({
         project: projectArg, selection: str('Selection id.'), tasks: arr(str('task id'), 'Tasks.'), shots: arr(str('shot id'), 'Shots.'),
         dir: str('Delivery directory (absolute or ~/relative to the session workspace).'),
@@ -322,14 +322,14 @@ export function taskManagementTools(rt: ChengyingRuntime): ToolDefinition[] {
         include_raw: bool('Also copy the paired RAW original alongside the rendered export.'),
         c2pa: bool('Write a C2PA content-credentials manifest and sign with c2patool when available.'),
         manifest: bool('Write manifest.json (default true).'), overwrite: bool('Replace this project’s earlier export (default true).'),
-        background: bool('Run as background job.'),
+        background: bool('Run as background job.'), archive: bool('Also write a store-only .zip next to the delivery directory.'),
       }),
       async run(args, exec) {
         const project = rt.project(args.project, exec.agent?.id)
         const result = await runDelivery(rt, project, exec, {
           selection: args.selection, tasks: args.tasks, shots: args.shots, dir: args.dir ?? project.exportDir, mode: args.mode ?? 'rendered',
           manifest: args.manifest, format: args.format as 'jpeg', quality: args.quality, maxEdge: args.max_edge,
-          subdir: args.subdir, naming: args.naming as 'original', source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background,
+          subdir: args.subdir, naming: args.naming as 'original', source: args.source, includeRaw: args.include_raw, c2pa: args.c2pa, overwrite: args.overwrite, background: args.background, archive: args.archive,
         })
         // Preserve export_run's compact item shape for existing agents.
         if (result.mode === 'inline' && result.deliveryMode === 'rendered' && Array.isArray(result.items)) {

@@ -126,7 +126,7 @@ export interface DeliveryManifest {
   mode: 'originals' | 'rendered'
   project: { id: string; root: string }
   plan: unknown
-  summary: { exported: number; failed: number; metadataVerified: boolean }
+  summary: { exported: number; failed: number; metadataVerified: boolean; originalsIntact: boolean }
   items: unknown[]
 }
 
