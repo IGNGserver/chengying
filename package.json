@@ -68,6 +68,12 @@
     "@deepseek-ai/schemastery": "^3.18.5",
     "react": "^19.1.1"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
+  },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.5"
   },
