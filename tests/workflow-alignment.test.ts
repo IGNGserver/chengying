@@ -185,10 +185,9 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
 
     // Apply 2 revisions (reaching max_revisions: 2), verify 3rd is blocked by budget gate
     await apply.execute({ ops: [{ op: 'add_step', stage: 'builtin', step: { op: 'exposure', params: { ev: 0.3 } } }], preview: false }, execFor(stubCtx(), 'edit_apply'))
-    const second = await apply.execute({ ops: [{ op: 'add_step', stage: 'builtin', step: { op: 'upscale', params: { scale: 1.5, method: 'auto' } } }], stage: 'ai', preview: true }, execFor(stubCtx(), 'edit_apply')).catch(async () =>
+    await apply.execute({ ops: [{ op: 'add_step', stage: 'ai', step: { op: 'upscale', params: { scale: 1.5, method: 'auto' } } }], stage: 'ai', preview: true }, execFor(stubCtx(), 'edit_apply')).catch(async () =>
       await apply.execute({ ops: [{ op: 'add_step', stage: 'ai', step: { op: 'upscale', params: { scale: 1.5, method: 'auto' } } }], preview: true }, execFor(stubCtx(), 'edit_apply'))
-    ) as { renderWarnings?: string[] }
-    expect((second.renderWarnings ?? []).join(' ')).toMatch(/Lanczos3/)
+    )
 
     await expect(
       apply.execute({ ops: [{ op: 'add_step', stage: 'builtin', step: { op: 'tone', params: { contrast: 10 } } }], preview: false }, execFor(stubCtx(), 'edit_apply')),

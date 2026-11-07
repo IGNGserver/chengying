@@ -93,7 +93,7 @@ export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
 
     defineTool<{ engine: string; tool: string; arguments?: Record<string, unknown> }>({
       name: 'edit_native',
-      description: 'Call an engine-native tool directly (e.g. darktable-mcp tools such as image_stats, get_metadata, list_styles, decode_params when the installed darktable provides darktable-mcp). File paths are checked: inputs must be readable, outputs land in Chengying\'s scratch/export directories.',
+      description: 'Call an engine-native tool directly (e.g. darktable-mcp tools such as image_stats, get_metadata, list_styles, decode_params when the installed darktable provides darktable-mcp). File paths are checked: inputs must be readable, outputs land in Chengying\'s scratch/export directories. For built-in engines, supports "image_stats" (returns detailed analysis: p05, p50, p95, localContrast, colorCast, faceStats) and "render".',
       parameters: obj({ engine: str('Engine id.'), tool: str('Native tool name (see edit_engines nativeTools).'), arguments: anyJson('Native tool arguments.') }, ['engine', 'tool']),
       async run(args, exec) {
         const e = rt.engines().get(args.engine)
@@ -175,11 +175,15 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
         if (maxRev > 0 && usedEdits >= maxRev - 1) warnings.push(`budget notice: ${Math.max(0, maxRev - usedEdits)} edit_apply iteration(s) remaining; finalize with edit_finish soon`)
         const out: Record<string, unknown> = { revision: { id: revision.id, seq: revision.seq, message: revision.message }, warnings, steps: revision.doc.stages.map((s, i) => ({ stage: i, engine: s.engine, steps: s.steps.map(x => ({ id: x.id, op: x.op, params: x.params, mask: x.mask === undefined ? undefined : true, enabled: x.enabled, instance: x.instance })) })) }
         if (args.preview !== false) {
+        if (args.preview !== false) {
           const r = await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
           out.stats = r.stats
           out.renderWarnings = r.warnings
           const imgPath = args.compare === true ? (await svc.compare(taskId, { revisionId: revision.id, signal: exec.signal })).path : r.path
           const img = await rt.imageForModel(imgPath, exec, { caption: args.compare === true ? `original | rev ${revision.seq}` : `rev ${revision.seq}` })
+          out.images = img.image ? [img.image] : []
+          if (img.reason) out.note = img.reason
+        }
           out.images = img.image ? [img.image] : []
           if (img.reason) out.note = img.reason
         }

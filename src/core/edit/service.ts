@@ -40,14 +40,17 @@ export interface ImageStats {
   width: number
   height: number
   mean: { r: number; g: number; b: number; luma: number }
-  percentiles: { p01: number; p50: number; p99: number }
+  percentiles: { p05: number; p50: number; p95: number }
   clipHigh: number
   clipLow: number
+  localContrast: number
+  colorCast: { r: number; g: number; b: number }
   histogram: number[]
   saturation: number
   zones?: { shadows: number; midtones: number; highlights: number }
   cast?: { a: number; b: number }
   faceLuma?: number
+  faceStats?: { luma: number; contrast: number }
 }
 
 export interface RenderOutcome {
@@ -63,7 +66,7 @@ export interface RenderOutcome {
 
 const ACTIVE: TaskStatus[] = ['queued', 'running', 'paused', 'waiting-authorization']
 
-export async function imageStats(path: string, opts?: { faceBox?: [number, number, number, number] }): Promise<ImageStats> {
+export async function imageStats(path: string, opts?: { faceBox?: [number, number, number, number] } | [number, number, number, number]): Promise<ImageStats> {
   const { data, info } = await sharp(path, { failOn: 'none' })
     .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
     .toColourspace('srgb')
@@ -74,10 +77,11 @@ export async function imageStats(path: string, opts?: { faceBox?: [number, numbe
   const is16 = data.byteLength >= n * 6
   const u16 = is16 ? new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2) : undefined
   let r = 0; let g = 0; let b = 0; let hi = 0; let lo = 0; let sat = 0
+  let rSq = 0; let gSq = 0; let bSq = 0
   let shSum = 0; let shN = 0; let midSum = 0; let midN = 0; let hlSum = 0; let hlN = 0
   let castA = 0; let castB = 0; let castN = 0; let allA = 0; let allB = 0; let labSampled = 0
-  let faceSum = 0; let faceN = 0
-  const fb = opts?.faceBox
+  let faceSum = 0; let faceN = 0; let faceSq = 0
+  const fb = Array.isArray(opts) ? opts : opts?.faceBox
   const fx0 = fb ? Math.floor(fb[0] * info.width) : -1
   const fy0 = fb ? Math.floor(fb[1] * info.height) : -1
   const fx1 = fb ? Math.ceil((fb[0] + fb[2]) * info.width) : -1
@@ -89,13 +93,18 @@ export async function imageStats(path: string, opts?: { faceBox?: [number, numbe
     const G = u16 !== undefined ? Math.round((u16[j + 1] as number) / 257) : (data[j + 1] as number)
     const B = u16 !== undefined ? Math.round((u16[j + 2] as number) / 257) : (data[j + 2] as number)
     r += R; g += G; b += B
+    rSq += R * R; gSq += G * G; bSq += B * B
     const y = Math.min(255, Math.max(0, Math.round(0.2126 * R + 0.7152 * G + 0.0722 * B)))
     hist[y] = (hist[y] ?? 0) + 1
     if (y < 64) { shSum += y; shN++ } else if (y < 192) { midSum += y; midN++ } else { hlSum += y; hlN++ }
     if (fb !== undefined) {
       const px = i % info.width
       const py = (i - px) / info.width
-      if (px >= fx0 && px < fx1 && py >= fy0 && py < fy1) { faceSum += y; faceN++ }
+      if (px >= fx0 && px < fx1 && py >= fy0 && py < fy1) {
+        faceSum += y
+        faceSq += y * y
+        faceN++
+      }
     }
     if (i % labStep === 0) {
       const [L, A, B_lab] = rgbToLab(R, G, B)
@@ -112,13 +121,21 @@ export async function imageStats(path: string, opts?: { faceBox?: [number, numbe
   for (let i = 0; i < 16; i++) coarse.push(round(hist.slice(i * 16, i * 16 + 16).reduce((a, x) => a + x, 0) / n * 100, 2))
   const meta = await sharp(path, { failOn: 'none' }).metadata()
   const useNeutral = castN > labSampled * 0.03
+  const meanR = r / n; const meanG = g / n; const meanB = b / n
+  const stdR = Math.sqrt(Math.max(0, rSq / n - meanR ** 2))
+  const stdG = Math.sqrt(Math.max(0, gSq / n - meanG ** 2))
+  const stdB = Math.sqrt(Math.max(0, bSq / n - meanB ** 2))
+  const fLuma = faceN > 0 ? faceSum / faceN : undefined
+  const fContrast = faceN > 0 && fLuma !== undefined ? Math.sqrt(Math.max(0, faceSq / faceN - fLuma ** 2)) : undefined
   return {
     width: meta.width ?? info.width,
     height: meta.height ?? info.height,
-    mean: { r: round(r / n, 1), g: round(g / n, 1), b: round(b / n, 1), luma: round((0.2126 * r + 0.7152 * g + 0.0722 * b) / n, 1) },
-    percentiles: { p01: pct(0.01), p50: pct(0.5), p99: pct(0.99) },
+    mean: { r: round(meanR, 1), g: round(meanG, 1), b: round(meanB, 1), luma: round(0.2126 * meanR + 0.7152 * meanG + 0.0722 * meanB, 1) },
+    percentiles: { p05: pct(0.05), p50: pct(0.5), p95: pct(0.95) },
     clipHigh: round(hi / n * 100, 2),
     clipLow: round(lo / n * 100, 2),
+    localContrast: round(Math.sqrt((stdR ** 2 + stdG ** 2 + stdB ** 2) / 3), 1),
+    colorCast: { r: round(meanR - meanG, 1), g: round(meanG - meanB, 1), b: round(meanB - meanR, 1) },
     histogram: coarse,
     saturation: round(sat / n * 100, 1),
     zones: {
@@ -130,7 +147,7 @@ export async function imageStats(path: string, opts?: { faceBox?: [number, numbe
       a: round(useNeutral ? castA / castN : allA / labSampled, 2),
       b: round(useNeutral ? castB / castN : allB / labSampled, 2),
     } : undefined,
-    ...(faceN > 0 ? { faceLuma: round(faceSum / faceN, 1) } : {}),
+    ...(faceN > 0 ? { faceLuma: round(faceSum / faceN, 1), faceStats: { luma: round(fLuma!, 1), contrast: round(fContrast!, 1) } } : {}),
   }
 }
 
@@ -587,7 +604,7 @@ export class EditService {
       }
     }
     const rightSeq = opts.revisionId !== undefined ? this.project.repo.revision(opts.revisionId)?.seq : this.head(taskId).seq
-    const h = 600
+    const h = 800
     const a = await sharp(leftPath).resize({ height: h }).jpeg().toBuffer({ resolveWithObject: true })
     const b = await sharp(right.path).resize({ height: h }).jpeg().toBuffer({ resolveWithObject: true })
     const label = (t: string): Buffer => Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="220" height="30"><rect width="100%" height="100%" fill="#000" fill-opacity="0.55"/><text x="8" y="21" font-family="Helvetica,Arial" font-size="17" fill="#fff">${t}</text></svg>`)
@@ -595,7 +612,7 @@ export class EditService {
     const out = this.project.guard.writable(this.project.path('sheets', `${newId('cmp')}.jpg`))
     await sharp({ create: { width, height: h, channels: 3, background: '#111' } })
       .composite([{ input: a.data, left: 0, top: 0 }, { input: b.data, left: a.info.width + 12, top: 0 }, { input: label(leftLabel), left: 6, top: 6 }, { input: label(`rev ${rightSeq}`), left: a.info.width + 18, top: 6 }])
-      .jpeg({ quality: 85 }).toFile(out)
+      .jpeg({ quality: 92 }).toFile(out)
     return { path: out, left: leftPath, right: right.path }
   }
 

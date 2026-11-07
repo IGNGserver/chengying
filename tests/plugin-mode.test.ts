@@ -77,7 +77,7 @@ describe('Host / agent preset split', () => {
     const c = capture({ extras: true })
     apply(c.ctx, resolveConfig({ ...base, mode: 'host' }))
     expect(c.tools).toEqual([])
-    expect(c.skills).toEqual(['chengying-batch-ops', 'chengying-engine-troubleshoot'])
+    expect(c.skills).toEqual(['chengying-aesthetic-grading', 'chengying-style-recipes', 'chengying-engine-mastery', 'chengying-batch-ops', 'chengying-engine-troubleshoot'])
     expect(c.env).toHaveLength(1)
     expect(c.env[0]?.name).toBe('chengying')
   })
