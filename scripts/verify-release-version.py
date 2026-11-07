@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -82,6 +83,26 @@ def verify_tag(expected: str, tag: str | None) -> None:
         fail(f"release workflow must check out v{expected}; exact tag at HEAD is {exact}")
 
 
+def verify_package_manifest(expected: str) -> None:
+    """The npm/DSH manifest must carry the same version.
+
+    `pnpm pack` names the installable bundle after `package.json`, and the
+    build inlines it into `__CHENGYING_VERSION__`; when the manifest drifts
+    from `VERSION` a release ships assets named after the previous version.
+    """
+    manifest_path = ROOT / "package.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"cannot read package.json: {error}")
+    manifest_version = normalize(str(manifest.get("version", "")))
+    if manifest_version != expected:
+        fail(
+            f"package.json version {manifest_version or '(missing)'} does not match "
+            f"VERSION {expected}; bump both before tagging"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
@@ -98,6 +119,7 @@ def main() -> None:
     if actual != expected:
         fail(f"VERSION {actual} does not match expected {expected}")
 
+    verify_package_manifest(expected)
     verify_latest_tag(expected)
     verify_tag(expected, args.tag)
     print(f"Release version verified: {expected}")
