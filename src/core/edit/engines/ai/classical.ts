@@ -85,11 +85,23 @@ export function inpaintTelea(img: FImage, mask: Float32Array, radius = 5): FImag
   }
   const paint = (x: number, y: number): void => {
     const i = y * w + x
+    const di = dist[i] as number
     const acc = [0, 0, 0]
     let wsum = 0
-    // distance gradient for direction weighting
-    const gx = ((dist[Math.min(n - 1, i + 1)] ?? 0) - (dist[Math.max(0, i - 1)] ?? 0)) / 2
-    const gy = ((dist[Math.min(n - 1, i + w)] ?? 0) - (dist[Math.max(0, i - w)] ?? 0)) / 2
+    // Safe distance gradient using only non-INSIDE neighbours (avoids 1e6 sentinel overflow)
+    const hasL = x > 0 && flag[i - 1] !== INSIDE
+    const hasR = x < w - 1 && flag[i + 1] !== INSIDE
+    const hasU = y > 0 && flag[i - w] !== INSIDE
+    const hasD = y < h - 1 && flag[i + w] !== INSIDE
+    const dL = hasL ? (dist[i - 1] as number) : di
+    const dR = hasR ? (dist[i + 1] as number) : di
+    const dU = hasU ? (dist[i - w] as number) : di
+    const dD = hasD ? (dist[i + w] as number) : di
+    const gx = (dR - dL) / ((hasL ? 1 : 0) + (hasR ? 1 : 0) || 1)
+    const gy = (dD - dU) / ((hasU ? 1 : 0) + (hasD ? 1 : 0) || 1)
+    const gLen = Math.hypot(gx, gy) || 1
+    const nx = gx / gLen
+    const ny = gy / gLen
     for (let yy = Math.max(0, y - radius); yy <= Math.min(h - 1, y + radius); yy++) {
       for (let xx = Math.max(0, x - radius); xx <= Math.min(w - 1, x + radius); xx++) {
         const j = yy * w + xx
@@ -98,12 +110,24 @@ export function inpaintTelea(img: FImage, mask: Float32Array, radius = 5): FImag
         const len2 = rx * rx + ry * ry
         if (len2 > radius * radius || len2 === 0) continue
         const len = Math.sqrt(len2)
-        let dir = Math.abs((rx * gx + ry * gy) / len)
-        if (dir < 1e-6) dir = 1e-6
-        const dst = 1 / (len2)
-        const lev = 1 / (1 + Math.abs((dist[j] as number) - (dist[i] as number)))
+        let dir = Math.abs((rx * nx + ry * ny) / len)
+        if (dir < 1e-4) dir = 1e-4
+        const dst = 1 / (len2 * len)
+        const lev = 1 / (1 + Math.abs((dist[j] as number) - di))
         const wgt = dir * dst * lev
-        for (let c = 0; c < 3; c++) acc[c] = (acc[c] as number) + wgt * (out[j * 3 + c] as number)
+        // First-order Taylor projection using known image gradient at j (clamped for stability)
+        const jHasL = xx > 0 && flag[j - 1] !== INSIDE
+        const jHasR = xx < w - 1 && flag[j + 1] !== INSIDE
+        const jHasU = yy > 0 && flag[j - w] !== INSIDE
+        const jHasD = yy < h - 1 && flag[j + w] !== INSIDE
+        for (let c = 0; c < 3; c++) {
+          const baseVal = out[j * 3 + c] as number
+          let igx = 0; let igy = 0
+          if (jHasL && jHasR) igx = ((out[(j + 1) * 3 + c] as number) - (out[(j - 1) * 3 + c] as number)) * 0.5
+          if (jHasU && jHasD) igy = ((out[(j + w) * 3 + c] as number) - (out[(j - w) * 3 + c] as number)) * 0.5
+          const proj = Math.max(-0.08, Math.min(0.08, (igx * rx + igy * ry) * 0.35))
+          acc[c] = (acc[c] as number) + wgt * Math.min(1, Math.max(0, baseVal + proj))
+        }
         wsum += wgt
       }
     }
@@ -126,6 +150,54 @@ export function inpaintTelea(img: FImage, mask: Float32Array, radius = 5): FImag
       paint(xx, yy)
       flag[j] = BAND
       heap.push(d, j)
+    }
+  }
+  // Micro-texture transfer for interior pixels (dist > 2.5): copy high-frequency
+  // detail residual from the closest matching known ring pixel so larger repairs
+  // do not look like flat plastic smudges.
+  const knownRing: Array<{ x: number; y: number; luma: number; hf: [number, number, number] }> = []
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      if ((mask[i] as number) > 0.5) continue
+      // Only sample unmasked ring pixels within 2..radius*2 px of the mask
+      let nearMask = false
+      const stepR = Math.max(1, Math.min(4, radius))
+      for (const [dx, dy] of [[stepR, 0], [-stepR, 0], [0, stepR], [0, -stepR]] as const) {
+        const nx = x + dx; const ny = y + dy
+        if (nx >= 0 && ny >= 0 && nx < w && ny < h && (mask[ny * w + nx] as number) > 0.5) { nearMask = true; break }
+      }
+      if (!nearMask) continue
+      const hf: [number, number, number] = [0, 0, 0]
+      for (let c = 0; c < 3; c++) {
+        const center = out[i * 3 + c] as number
+        const avg4 = ((out[(i - 1) * 3 + c] as number) + (out[(i + 1) * 3 + c] as number) + (out[(i - w) * 3 + c] as number) + (out[(i + w) * 3 + c] as number)) * 0.25
+        hf[c] = center - avg4
+      }
+      const luma = 0.2126 * (out[i * 3] as number) + 0.7152 * (out[i * 3 + 1] as number) + 0.0722 * (out[i * 3 + 2] as number)
+      knownRing.push({ x, y, luma, hf })
+    }
+  }
+  if (knownRing.length >= 8) {
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x
+        const d = dist[i] as number
+        if ((mask[i] as number) <= 0.5 || d <= 2.2) continue
+        const luma = 0.2126 * (out[i * 3] as number) + 0.7152 * (out[i * 3 + 1] as number) + 0.0722 * (out[i * 3 + 2] as number)
+        const idx = ((x * 73 + y * 37) >>> 0) % knownRing.length
+        let bestSample = knownRing[idx]!
+        let bestDiff = Math.abs(bestSample.luma - luma)
+        for (let k = 1; k <= 4; k++) {
+          const cand = knownRing[(idx + k * 13) % knownRing.length]!
+          const diff = Math.abs(cand.luma - luma)
+          if (diff < bestDiff) { bestDiff = diff; bestSample = cand }
+        }
+        const blend = Math.min(0.65, (d - 2.2) / 3.5)
+        for (let c = 0; c < 3; c++) {
+          out[i * 3 + c] = Math.min(1, Math.max(0, (out[i * 3 + c] as number) + (bestSample.hf[c] as number) * blend))
+        }
+      }
     }
   }
   for (let i = 0; i < out.length; i++) out[i] = toLinear(Math.min(1, Math.max(0, out[i] as number)))
@@ -215,12 +287,21 @@ export function applyStyle(img: FImage, ref: StyleFingerprint, opts: StyleOption
     const lab = linToLab(img.data[j] as number, img.data[j + 1] as number, img.data[j + 2] as number)
     let [L, A, B] = lab
     const w = protect ? smooth(2, 12, L) * (1 - smooth(85, 99, L)) : 1
-    if (opts.tone) L = L + (mapL(L) - L) * s * (protect ? 0.3 + 0.7 * w : 1)
+    if (opts.tone) {
+      const mappedL = mapL(L)
+      // Cap extreme quantile jumps when strength < 1 so local contrast is not torn
+      const maxDeltaL = s < 0.99 ? 28 : 100
+      const deltaL = Math.max(-maxDeltaL, Math.min(maxDeltaL, mappedL - L))
+      L = L + deltaL * s * (protect ? 0.3 + 0.7 * w : 1)
+    }
     if (opts.color) {
+      // Gentle skin-hue protection when strength < 0.95 so landscape casts do not tint portraits green/magenta
+      const isSkinHue = protect && s < 0.95 && L > 25 && L < 85 && A > 5 && A < 26 && B > 7 && B < 34 && B >= A * 0.75
+      const skinDamp = isSkinHue ? 0.55 : 1
       const tA = src.mean[1] + shiftA + (A - src.mean[1]) * ratioA
       const tB = src.mean[2] + shiftB + (B - src.mean[2]) * ratioB
-      A = A + (tA - A) * s * w
-      B = B + (tB - B) * s * w
+      A = A + (tA - A) * s * w * skinDamp
+      B = B + (tB - B) * s * w * skinDamp
     }
     const [r, g, b] = labToLin(L, A, B)
     out[j] = Math.max(0, r); out[j + 1] = Math.max(0, g); out[j + 2] = Math.max(0, b)

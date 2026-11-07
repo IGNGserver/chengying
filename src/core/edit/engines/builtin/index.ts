@@ -16,7 +16,7 @@ import { nowIso } from '../../../util/misc.ts'
 
 declare const __CHENGYING_VERSION__: string
 const VERSION = typeof __CHENGYING_VERSION__ === 'string' ? __CHENGYING_VERSION__ : 'dev'
-const CATALOG_VERSION = 3
+const CATALOG_VERSION = 4
 
 const STAGE_OPTIONS: ParamSchema = {
   type: 'object',
@@ -84,7 +84,8 @@ export class BuiltinEngine implements EngineAdapter {
     const warnings: string[] = []
     const opts = this.validateStageOptions(req.stage.options).options
     let img = await loadImage(req.input, req.maxEdge)
-    const ctx: OpContext = { readable: req.readable ?? ((p: string) => p), seed: Number(opts.seed ?? 1) }
+    const scale = req.fullEdge !== undefined && req.fullEdge > 0 ? Math.min(1, Math.max(img.width, img.height) / req.fullEdge) : 1
+    const ctx: OpContext = { readable: req.readable ?? ((p: string) => p), seed: Number(opts.seed ?? 1), scale }
     const steps = req.stage.steps.filter(s => s.enabled)
     const ops = new Map(BUILTIN_OPS.map(o => [o.id, o]))
     for (const s of steps) {

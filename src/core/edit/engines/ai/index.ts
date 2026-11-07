@@ -39,7 +39,7 @@ import { run } from '../../../util/proc.ts'
 
 declare const __CHENGYING_VERSION__: string
 const VERSION = typeof __CHENGYING_VERSION__ === 'string' ? __CHENGYING_VERSION__ : 'dev'
-const CATALOG_VERSION = 1
+const CATALOG_VERSION = 2
 
 export interface AiCommandOp {
   /** Operation id exposed to the agent. Must not start with gen_ (generation goes through providers). */
@@ -156,6 +156,8 @@ export class AiEngine implements EngineAdapter {
         description: 'Pixels created by a generative provider, composited through the mask. Do not add this step directly: call edit_generate, which checks the user\'s authorization, runs the provider once and records the layer.',
         params: { type: 'object', additionalProperties: false, properties: {
           asset: { type: 'string', description: 'generated image (recorded by edit_generate)' },
+          patch_asset: { type: 'string', description: 'optional high-resolution localized crop patch (recorded by edit_generate)' },
+          crop_box: { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, minItems: 4, maxItems: 4, description: 'normalized [left, top, width, height] for patch_asset' },
           kind: { type: 'string', enum: ['remove', 'fill', 'replace', 'enhance', 'expand', 'edit'], default: 'fill' },
           prompt: { type: 'string', default: '' },
           provider: { type: 'string', default: '' },
@@ -249,7 +251,29 @@ export class AiEngine implements EngineAdapter {
         case 'gen_layer': {
           const asset = (req.readable ?? ((x: string) => x))(String(p.asset))
           if (!existsSync(asset)) throw new ChengyingError('not-found', `generated layer ${asset} is missing; regenerate it with edit_generate`)
-          const layer = await loadAsset(asset, img.width, img.height)
+          let layer: FImage | undefined
+          if (typeof p.patch_asset === 'string' && p.patch_asset !== '' && Array.isArray(p.crop_box) && p.crop_box.length === 4) {
+            const patchPath = (req.readable ?? ((x: string) => x))(String(p.patch_asset))
+            if (existsSync(patchPath)) {
+              const [bx, by, bw, bh] = p.crop_box.map(Number) as [number, number, number, number]
+              const left = Math.max(0, Math.min(img.width - 1, Math.round(bx * img.width)))
+              const top = Math.max(0, Math.min(img.height - 1, Math.round(by * img.height)))
+              const width = Math.max(1, Math.min(img.width - left, Math.round(bw * img.width)))
+              const height = Math.max(1, Math.min(img.height - top, Math.round(bh * img.height)))
+              const patch = await loadAsset(patchPath, width, height)
+              layer = { width: img.width, height: img.height, data: new Float32Array(img.data) }
+              for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                  const dst = ((top + y) * img.width + (left + x)) * 3
+                  const src = (y * width + x) * 3
+                  layer.data[dst] = patch.data[src] as number
+                  layer.data[dst + 1] = patch.data[src + 1] as number
+                  layer.data[dst + 2] = patch.data[src + 2] as number
+                }
+              }
+            }
+          }
+          layer ??= await loadAsset(asset, img.width, img.height)
           const L = Math.max(img.width, img.height)
           let mask = step.mask !== undefined ? rasterizeMask(step.mask, img) : new Float32Array(img.width * img.height).fill(1)
           if (Number(p.feather) > 0 && step.mask !== undefined) mask = gaussBlur(mask, img.width, img.height, Number(p.feather) * L)

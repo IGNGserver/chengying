@@ -8,7 +8,7 @@ import type { ParamSchema } from '../../schema.ts'
 import { boxBlur, clone, gaussBlur, guidedFilter, lumaOf, luminancePlane, sample, toLinear, toSrgb, type FImage } from './image.ts'
 import { ChengyingError } from '../../../util/errors.ts'
 
-export interface OpContext { readable(path: string): string; seed: number }
+export interface OpContext { readable(path: string): string; seed: number; scale?: number }
 
 export interface BuiltinOp {
   id: string
@@ -70,7 +70,11 @@ export function curveLut(points: Array<[number, number]>): Float32Array {
 
 const lutAt = (lut: Float32Array, v: number): number => lut[Math.round(clamp01(v) * 4095)] as number
 
-/** Apply a perceptual-domain luminance mapping while keeping chroma ratios. */
+/**
+ * Apply a perceptual-domain luminance mapping while preserving hue and rolling
+ * off highlight chroma smoothly so boosted highlights never clip a single RGB
+ * channel and twist hues (e.g. skin tones turning yellow).
+ */
 function mapLuminance(img: FImage, f: (perceptualY: number) => number): FImage {
   return mapPixels(img, (r, g, b) => {
     const y = lumaOf(r, g, b)
@@ -78,7 +82,23 @@ function mapLuminance(img: FImage, f: (perceptualY: number) => number): FImage {
     const yp = toSrgb(y)
     const ny = toLinear(Math.max(0, f(yp)))
     const k = ny / y
-    return [r * k, g * k, b * k]
+    let ro = r * k; let go = g * k; let bo = b * k
+    const mx = Math.max(ro, go, bo)
+    if (mx > 1) {
+      if (ny >= 1) return [1, 1, 1]
+      const scale = Math.max(0, (1 - ny) / (mx - ny + 1e-7))
+      ro = ny + (ro - ny) * scale
+      go = ny + (go - ny) * scale
+      bo = ny + (bo - ny) * scale
+    }
+    const mn = Math.min(ro, go, bo)
+    if (mn < 0 && ny > 0) {
+      const scale = Math.max(0, ny / (ny - mn + 1e-7))
+      ro = ny + (ro - ny) * scale
+      go = ny + (go - ny) * scale
+      bo = ny + (bo - ny) * scale
+    }
+    return [ro, go, bo]
   })
 }
 
@@ -195,18 +215,34 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   },
   {
     id: 'white_balance', title: 'White balance', category: 'color', maskable: true,
-    description: 'Temperature (blue↔amber) and tint (green↔magenta) correction as channel gains in linear light.',
+    description: 'Temperature (blue↔amber) and tint (green↔magenta) correction in linear light with highlight neutrality roll-off.',
     params: obj({ temperature: num(-100, 100, 0, 'negative cooler, positive warmer'), tint: num(-100, 100, 0, 'negative greener, positive more magenta') }),
     apply: (img, p) => {
       const t = p.temperature / 100; const ti = p.tint / 100
       const kr = 2 ** (0.45 * t); const kb = 2 ** (-0.45 * t); const kg = 2 ** (-0.3 * ti)
       const norm = lumaOf(kr, kg, kb)
-      return mapPixels(img, (r, g, b) => [(r * kr) / norm, (g * kg) / norm, (b * kb) / norm])
+      const gr = kr / norm; const gg = kg / norm; const gb = kb / norm
+      return mapPixels(img, (r, g, b) => {
+        const y = lumaOf(r, g, b)
+        // Protect near-clipped specular whites (>0.88 linear) from acquiring a hard colour cast
+        const hlProtect = y > 0.88 ? Math.max(0.15, 1 - (y - 0.88) / 0.2) : 1
+        const pr = 1 + (gr - 1) * hlProtect
+        const pg = 1 + (gg - 1) * hlProtect
+        const pb = 1 + (gb - 1) * hlProtect
+        let ro = r * pr; let go = g * pg; let bo = b * pb
+        const ny = lumaOf(ro, go, bo)
+        const mx = Math.max(ro, go, bo)
+        if (mx > 1 && ny < 1) {
+          const s = Math.max(0, (1 - ny) / (mx - ny + 1e-7))
+          ro = ny + (ro - ny) * s; go = ny + (go - ny) * s; bo = ny + (bo - ny) * s
+        }
+        return [ro, go, bo]
+      })
     },
   },
   {
     id: 'tone', title: 'Basic tone', category: 'tone', maskable: true,
-    description: 'Lightroom-style basic tone: contrast, highlights, shadows, whites, blacks, brightness (perceptual luminance, chroma preserved).',
+    description: 'Lightroom-style basic tone: contrast, highlights, shadows, whites, blacks, brightness (perceptual luminance, chroma preserved, linear highlight recovery).',
     params: obj({
       contrast: num(-100, 100, 0, 'midtone contrast'), highlights: num(-100, 100, 0, 'recover (−) or boost (+) highlights'),
       shadows: num(-100, 100, 0, 'lift (+) or deepen (−) shadows'), whites: num(-100, 100, 0, 'white point'), blacks: num(-100, 100, 0, 'black point'),
@@ -217,32 +253,85 @@ export const BUILTIN_OPS: BuiltinOp[] = [
       const lut = new Float32Array(4096)
       for (let k = 0; k < 4096; k++) {
         let x = k / 4095
-        x = x * (1 + wh * 0.25) + bl * 0.06 * (1 - x)
+        if (wh !== 0) x = x + wh * 0.22 * (x ** 1.5) * (1 - 0.35 * x)
+        if (bl !== 0) {
+          x = bl >= 0
+            ? x + bl * 0.16 * (x / (x + 0.02)) * ((1 - x) ** 2)
+            : Math.max(0, x + bl * 0.12 * ((1 - x) ** 2) * (0.2 + 0.8 * x))
+        }
         x = clamp01(x)
         if (br !== 0) x = x ** (br > 0 ? 1 / (1 + br * 0.8) : 1 - br * 0.8)
-        if (c !== 0) { const s = 1 / (1 + Math.exp(-(x - 0.5) * (4 + 6 * Math.abs(c)))); const s0 = 1 / (1 + Math.exp((4 + 6 * Math.abs(c)) / 2)); const s1 = 1 - s0; const sc = (s - s0) / (s1 - s0); x = c > 0 ? x + (sc - x) * c : x + (x - sc) * c * 0.6 }
-        const shadowW = (1 - x) ** 3; const highW = x ** 3
-        x += sh * 0.35 * shadowW * (x < 0.5 ? 1 : 0.5) + hl * 0.35 * highW * (hl < 0 ? 1 : 0.5)
+        if (c !== 0) {
+          const kSig = 4 + 6 * Math.abs(c)
+          const s = 1 / (1 + Math.exp(-(x - 0.5) * kSig))
+          const s0 = 1 / (1 + Math.exp(kSig / 2))
+          const sc = (s - s0) / (1 - 2 * s0)
+          x = c > 0 ? x + (sc - x) * c : x + (x - sc) * c * 0.6
+        }
+        const shadowBasis = ((1 - x) ** 2) * (x / (x + 0.035))
+        const highBasis = (x ** 2) * (1 - 0.62 * x)
+        x += sh * 0.42 * shadowBasis + hl * 0.42 * highBasis
         lut[k] = clamp01(x)
       }
-      return mapLuminance(img, y => lutAt(lut, y))
+      return mapPixels(img, (r, g, b) => {
+        const y0 = lumaOf(r, g, b)
+        if (y0 <= 1e-7) return [r, g, b]
+        let y = y0
+        if (hl < 0 && y > 0.75) {
+          const excess = y - 0.75
+          y = 0.75 + excess / (1 + excess * (-hl) * 1.4)
+        }
+        const yp = toSrgb(y)
+        const ny = toLinear(Math.max(0, lutAt(lut, yp)))
+        const scaleK = ny / y0
+        let ro = r * scaleK; let go = g * scaleK; let bo = b * scaleK
+        const mx = Math.max(ro, go, bo)
+        if (mx > 1) {
+          if (ny >= 1) return [1, 1, 1]
+          const s = Math.max(0, (1 - ny) / (mx - ny + 1e-7))
+          ro = ny + (ro - ny) * s; go = ny + (go - ny) * s; bo = ny + (bo - ny) * s
+        }
+        return [Math.max(0, ro), Math.max(0, go), Math.max(0, bo)]
+      })
     },
   },
   {
-    id: 'curve', title: 'Tone curve', category: 'tone', maskable: true,
-    description: 'Monotone cubic curve through control points in perceptual (sRGB-encoded) space, applied to luminance, all RGB channels or a single channel.',
+    id: 'curve', title: 'Tone curve', category: 'tone', maskable: true, example: { points: [[0, 0], [0.5, 0.65], [1, 1]] },
+    description: 'Monotone cubic curve through control points in perceptual (sRGB-encoded) space, applied to luminance, all RGB channels or per-channel (red/green/blue).',
     params: obj({
       points: { type: 'array', items: { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, minItems: 2, maxItems: 2 }, minItems: 2, maxItems: 32, default: [[0, 0], [1, 1]], description: '[[input, output], …] in 0..1' },
       channel: { type: 'string', enum: ['luma', 'rgb', 'red', 'green', 'blue'], default: 'luma', description: 'luma keeps saturation; rgb applies per channel' },
+      red: { type: 'array', items: { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, minItems: 2, maxItems: 2 }, minItems: 2, maxItems: 32, description: 'Optional red channel curve [[x, y], …] in 0..1' },
+      green: { type: 'array', items: { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, minItems: 2, maxItems: 2 }, minItems: 2, maxItems: 32, description: 'Optional green channel curve [[x, y], …] in 0..1' },
+      blue: { type: 'array', items: { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, minItems: 2, maxItems: 2 }, minItems: 2, maxItems: 32, description: 'Optional blue channel curve [[x, y], …] in 0..1' },
     }),
     apply: (img, p) => {
-      const lut = curveLut(p.points)
-      if (p.channel === 'luma') return mapLuminance(img, y => lutAt(lut, y))
-      const ch = { red: 0, green: 1, blue: 2 } as Record<string, number>
-      return mapPixels(img, (r, g, b) => {
-        const v = [r, g, b]
-        return v.map((x, i) => (p.channel === 'rgb' || ch[p.channel] === i ? toLinear(lutAt(lut, toSrgb(x))) : x)) as [number, number, number]
-      })
+      let cur = img
+      const hasPoints = Array.isArray(p.points) && p.points.length >= 2 && !(p.points.length === 2 && p.points[0]?.[0] === 0 && p.points[0]?.[1] === 0 && p.points[1]?.[0] === 1 && p.points[1]?.[1] === 1)
+      const hasPerChannel = Array.isArray(p.red) || Array.isArray(p.green) || Array.isArray(p.blue)
+      if (hasPoints || !hasPerChannel) {
+        const lut = curveLut(p.points ?? [[0, 0], [1, 1]])
+        if (p.channel === 'luma') {
+          cur = mapLuminance(cur, y => lutAt(lut, y))
+        } else {
+          const ch = { red: 0, green: 1, blue: 2 } as Record<string, number>
+          cur = mapPixels(cur, (r, g, b) => {
+            const v = [r, g, b]
+            return v.map((x, i) => (p.channel === 'rgb' || ch[p.channel] === i ? toLinear(lutAt(lut, toSrgb(x))) : x)) as [number, number, number]
+          })
+        }
+      }
+      if (hasPerChannel) {
+        const lutR = Array.isArray(p.red) && p.red.length >= 2 ? curveLut(p.red) : undefined
+        const lutG = Array.isArray(p.green) && p.green.length >= 2 ? curveLut(p.green) : undefined
+        const lutB = Array.isArray(p.blue) && p.blue.length >= 2 ? curveLut(p.blue) : undefined
+        cur = mapPixels(cur, (r, g, b) => [
+          lutR !== undefined ? toLinear(lutAt(lutR, toSrgb(r))) : r,
+          lutG !== undefined ? toLinear(lutAt(lutG, toSrgb(g))) : g,
+          lutB !== undefined ? toLinear(lutAt(lutB, toSrgb(b))) : b,
+        ])
+      }
+      return cur
     },
   },
   {
@@ -335,60 +424,100 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   },
   {
     id: 'clarity', title: 'Clarity / local contrast', category: 'detail', maskable: true,
-    description: 'Edge-aware local contrast on luminance (guided-filter base/detail split).',
+    description: 'Edge-aware local contrast on luminance (guided-filter base/detail split with halo suppression and extreme-tone protection).',
     params: obj({ amount: num(-100, 100, 0, 'strength'), radius: num(2, 200, 30, 'detail scale in pixels at full size') }),
     apply: (img, p) => {
       const Y = luminancePlane(img)
       const L = new Float32Array(Y.length)
       for (let i = 0; i < Y.length; i++) L[i] = Math.log2((Y[i] as number) + 1e-4)
       const r = Math.max(1, Math.round(p.radius * Math.max(img.width, img.height) / 3000))
-      const base = guidedFilter(L, L, img.width, img.height, r, 0.04)
+      const base = guidedFilter(L, L, img.width, img.height, r, 0.08)
       const k = p.amount / 100
       const out = new Float32Array(img.data.length)
       for (let i = 0, j = 0; i < Y.length; i++, j += 3) {
-        const detail = (L[i] as number) - (base[i] as number)
-        const gain = 2 ** (detail * k)
-        out[j] = (img.data[j] as number) * gain; out[j + 1] = (img.data[j + 1] as number) * gain; out[j + 2] = (img.data[j + 2] as number) * gain
+        const y = Y[i] as number
+        const yp = toSrgb(y)
+        const toneWeight = 0.35 + 0.65 * 4 * yp * (1 - yp)
+        const rawDetail = (L[i] as number) - (base[i] as number)
+        const detail = Math.tanh(rawDetail * 2.2) / 2.2
+        const gain = 2 ** (detail * k * toneWeight)
+        let ro = (img.data[j] as number) * gain
+        let go = (img.data[j + 1] as number) * gain
+        let bo = (img.data[j + 2] as number) * gain
+        const ny = y * gain
+        const mx = Math.max(ro, go, bo)
+        if (mx > 1 && ny < 1) {
+          const s = Math.max(0, (1 - ny) / (mx - ny + 1e-7))
+          ro = ny + (ro - ny) * s; go = ny + (go - ny) * s; bo = ny + (bo - ny) * s
+        }
+        out[j] = ro; out[j + 1] = go; out[j + 2] = bo
       }
       return { width: img.width, height: img.height, data: out }
     },
   },
   {
     id: 'dehaze', title: 'Dehaze', category: 'detail', maskable: true,
-    description: 'Dark-channel-prior haze removal (positive) or atmospheric haze (negative).',
+    description: 'Dark-channel-prior haze removal (positive) or atmospheric haze (negative) with guided-filter transmission refinement.',
     params: obj({ amount: num(-100, 100, 0, 'strength') }),
     apply: (img, p) => {
-      const n = img.width * img.height
+      const { width: w, height: h } = img
+      const n = w * h
       const dark = new Float32Array(n)
+      const Y = luminancePlane(img)
       for (let i = 0, j = 0; i < n; i++, j += 3) dark[i] = Math.min(img.data[j] as number, img.data[j + 1] as number, img.data[j + 2] as number)
-      const r = Math.max(2, Math.round(Math.max(img.width, img.height) / 120))
-      const dc = boxBlur(dark, img.width, img.height, r)
-      const sorted = Array.from(dc).sort((a, b) => b - a)
-      const A = Math.max(0.2, sorted[Math.floor(n * 0.001)] ?? 1)
+      const r = Math.max(2, Math.round(Math.max(w, h) / 100))
+      const dcCoarse = boxBlur(dark, w, h, r)
+      const dc = guidedFilter(dcCoarse, Y, w, h, Math.max(2, r * 2), 0.008)
+      const sorted = Array.from(dcCoarse).sort((a, b) => b - a)
+      const thresh = sorted[Math.floor(n * 0.002)] ?? 0.8
+      let ar = 0; let ag = 0; let ab = 0; let ac = 0
+      for (let i = 0, j = 0; i < n; i++, j += 3) {
+        if ((dcCoarse[i] as number) >= thresh) {
+          ar += img.data[j] as number; ag += img.data[j + 1] as number; ab += img.data[j + 2] as number; ac++
+        }
+      }
+      const aLuma = ac > 0 ? lumaOf(ar / ac, ag / ac, ab / ac) : 0.85
+      const A0 = Math.max(0.25, aLuma)
+      // Blend per-channel atmospheric light with neutral A0 so sky color is respected without extreme cast
+      const A: [number, number, number] = ac > 0
+        ? [
+            Math.max(0.25, 0.65 * A0 + 0.35 * (ar / ac)),
+            Math.max(0.25, 0.65 * A0 + 0.35 * (ag / ac)),
+            Math.max(0.25, 0.65 * A0 + 0.35 * (ab / ac)),
+          ]
+        : [A0, A0, A0]
       const k = p.amount / 100
       const out = new Float32Array(img.data.length)
       for (let i = 0, j = 0; i < n; i++, j += 3) {
-        const t = Math.max(0.15, 1 - 0.95 * k * ((dc[i] as number) / A))
+        const normDark = Math.min(1, Math.max(0, (dc[i] as number) / A0))
+        const t = Math.max(0.2, 1 - 0.88 * k * normDark)
         for (let c = 0; c < 3; c++) {
           const v = img.data[j + c] as number
-          out[j + c] = k >= 0 ? Math.max(0, (v - A) / t + A) : v + (A - v) * -k * 0.5
+          const acVal = A[c] as number
+          out[j + c] = k >= 0 ? Math.max(0, (v - acVal) / t + acVal) : v + (acVal - v) * -k * 0.5
         }
       }
-      return { width: img.width, height: img.height, data: out }
+      return { width: w, height: h, data: out }
     },
   },
   {
     id: 'denoise', title: 'Noise reduction', category: 'detail', maskable: true,
-    description: 'Edge-preserving luminance noise reduction (guided filter) and chroma noise reduction (opponent-channel smoothing).',
+    description: 'Edge-preserving luminance noise reduction (perceptual guided filter) and chroma noise reduction (opponent-channel smoothing).',
     params: obj({ luminance: num(0, 100, 0, 'luminance smoothing'), chroma: num(0, 100, 25, 'color noise smoothing'), detail: num(0, 100, 50, 'detail preservation') }),
-    apply: (img, p) => {
+    apply: (img, p, ctx) => {
       const { width: w, height: h } = img
       const n = w * h
       const Y = luminancePlane(img)
       let Yn = Y
+      const resScale = Math.max(1, Math.max(w, h) / 900) * (ctx?.scale !== undefined && ctx.scale > 0 ? 1 : 1)
       if (p.luminance > 0) {
-        const eps = (p.luminance / 100) ** 2 * 0.004 * (1.5 - p.detail / 100)
-        Yn = guidedFilter(Y, Y, w, h, Math.max(1, Math.round(1 + p.luminance / 40)), Math.max(1e-6, eps))
+        const Yp = new Float32Array(n)
+        for (let i = 0; i < n; i++) Yp[i] = toSrgb(Y[i] as number)
+        const eps = (p.luminance / 100) ** 2 * 0.016 * (1.5 - p.detail / 100)
+        const lumaRad = Math.max(1, Math.round((1 + p.luminance / 35) * resScale))
+        const YpSmooth = guidedFilter(Yp, Yp, w, h, lumaRad, Math.max(1e-6, eps))
+        Yn = new Float32Array(n)
+        for (let i = 0; i < n; i++) Yn[i] = toLinear(clamp01(YpSmooth[i] as number))
       }
       const cr = new Float32Array(n); const cb = new Float32Array(n)
       for (let i = 0, j = 0; i < n; i++, j += 3) { cr[i] = (img.data[j] as number) - (Y[i] as number); cb[i] = (img.data[j + 2] as number) - (Y[i] as number) }
@@ -398,8 +527,8 @@ export const BUILTIN_OPS: BuiltinOp[] = [
       const out = new Float32Array(img.data.length)
       for (let i = 0, j = 0; i < n; i++, j += 3) {
         const y = Yn[i] as number
-        const r = y + (crn[i] as number); const b = y + (cbn[i] as number)
-        const g = (y - 0.2126 * r - 0.0722 * b) / 0.7152
+        const r = Math.max(0, y + (crn[i] as number)); const b = Math.max(0, y + (cbn[i] as number))
+        const g = Math.max(0, (y - 0.2126 * r - 0.0722 * b) / 0.7152)
         out[j] = r; out[j + 1] = g; out[j + 2] = b
       }
       return { width: w, height: h, data: out }
@@ -409,12 +538,13 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     id: 'sharpen', title: 'Sharpen', category: 'detail', maskable: true,
     description: 'Unsharp mask on luminance with threshold and edge masking.',
     params: obj({ amount: num(0, 300, 60, 'strength %'), radius: num(0.3, 5, 1, 'radius px'), threshold: num(0, 50, 2, 'ignore differences below (‰)'), masking: num(0, 100, 0, 'restrict to edges') }),
-    apply: (img, p) => {
+    apply: (img, p, ctx) => {
       const { width: w, height: h } = img
       const Y = luminancePlane(img)
       const Yp = new Float32Array(Y.length)
       for (let i = 0; i < Y.length; i++) Yp[i] = toSrgb(Y[i] as number)
-      const blur = gaussBlur(Yp, w, h, p.radius)
+      const effRadius = Math.max(0.3, p.radius * (ctx?.scale ?? 1))
+      const blur = gaussBlur(Yp, w, h, effRadius)
       const th = p.threshold / 1000
       let edge: Float32Array | undefined
       if (p.masking > 0) {
@@ -439,14 +569,17 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   {
     id: 'vignette', title: 'Vignette', category: 'effect', maskable: true,
     description: 'Darken (negative) or lighten (positive) the corners.',
-    params: obj({ amount: num(-100, 100, 0, 'strength'), midpoint: num(0, 100, 50, 'where falloff starts'), roundness: num(-100, 100, 0, 'shape (positive rounder)'), feather: num(0, 100, 50, 'softness') }),
+    params: obj({ amount: num(-100, 100, 0, 'strength'), midpoint: num(0, 100, 50, 'where falloff starts (0..100)'), roundness: num(-100, 100, 0, 'shape (positive rounder)'), feather: num(0, 100, 50, 'softness (0..100)') }),
     apply: (img, p) => {
       const { width: w, height: h } = img
       const out = new Float32Array(img.data.length)
       const ar = w / h
       const round = 1 + p.roundness / 100
-      const start = 0.3 + (p.midpoint / 100) * 0.6
-      const soft = 0.1 + (p.feather / 100) * 0.8
+      // Accept both 0..100 percentages and accidental 0..1 fractions gracefully
+      const midPct = p.midpoint > 0 && p.midpoint <= 1 ? p.midpoint * 100 : p.midpoint
+      const fthPct = p.feather > 0 && p.feather <= 1 ? p.feather * 100 : p.feather
+      const start = 0.3 + (midPct / 100) * 0.6
+      const soft = 0.1 + (fthPct / 100) * 0.8
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
         let dx = ((x + 0.5) / w - 0.5) * 2; let dy = ((y + 0.5) / h - 0.5) * 2
         dx *= ar >= 1 ? 1 : ar; dy *= ar >= 1 ? 1 / ar ** (round - 1) : 1
@@ -463,12 +596,13 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     id: 'grain', title: 'Film grain', category: 'effect', maskable: true,
     description: 'Luminance film grain (seeded, reproducible).',
     params: obj({ amount: num(0, 100, 0, 'strength'), size: num(1, 4, 1.5, 'grain size px'), seed: { type: 'integer', minimum: 0, maximum: 1_000_000, default: 7 } }),
-    apply: (img, p) => {
+    apply: (img, p, ctx) => {
       const { width: w, height: h } = img
       let s = (p.seed as number) >>> 0 || 1
       const rnd = (): number => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) / 4294967296) - 0.5 }
       let noise: Float32Array = new Float32Array(w * h).map(() => rnd())
-      if (p.size > 1) noise = gaussBlur(noise, w, h, p.size / 2)
+      const effSize = Math.max(0.8, p.size * (ctx?.scale ?? 1))
+      if (effSize > 1) noise = gaussBlur(noise, w, h, effSize / 2)
       let max = 1e-6
       for (const v of noise) max = Math.max(max, Math.abs(v))
       const k = (p.amount / 100) * 0.12 / max
@@ -534,7 +668,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   },
   {
     id: 'heal', title: 'Spot healing (classical)', category: 'repair', maskable: false, example: { spots: [{ x: 0.72, y: 0.25, r: 0.04 }] },
-    description: 'Remove dust spots / small blemishes by cloning from a nearby source with feathered edges and tone matching. Non-generative.',
+    description: 'Remove dust spots / small blemishes by cloning from a nearby source with boundary-ring gradient matching and feathered edges. Non-generative.',
     params: obj({
       spots: { type: 'array', minItems: 1, maxItems: 200, items: obj({ x: num(0, 1, 0.5, 'spot center x'), y: num(0, 1, 0.5, 'spot center y'), r: num(0.001, 0.2, 0.01, 'radius (relative to longer side)'), src_x: { type: 'number', minimum: 0, maximum: 1, description: 'source center x (auto when omitted)' }, src_y: { type: 'number', minimum: 0, maximum: 1, description: 'source center y' } }), default: [] },
     }),
@@ -559,18 +693,35 @@ export const BUILTIN_OPS: BuiltinOp[] = [
             if (variance < best) { best = variance; sx = px; sy = py }
           }
         }
-        // tone match: mean difference between ring around target and ring around source
-        const ring = (x0: number, y0: number, c: number): number => { let s2 = 0; let n = 0; for (let k = 0; k < 24; k++) { const a = (k * Math.PI) / 12; s2 += sample(img, x0 + Math.cos(a) * r * 1.2, y0 + Math.sin(a) * r * 1.2, c); n++ } return s2 / n }
-        const offs = [0, 1, 2].map(c => ring(cx, cy, c) - ring(sx, sy, c))
-        for (let y = Math.floor(cy - r * 1.3); y <= Math.ceil(cy + r * 1.3); y++) {
-          for (let x = Math.floor(cx - r * 1.3); x <= Math.ceil(cx + r * 1.3); x++) {
+        // 2D linear plane tone match (mean + X/Y gradient difference between outer target ring at 1.35r and source ring)
+        const N_RING = 24
+        const rRing = r * 1.35
+        const meanOff = [0, 0, 0]
+        const gradX = [0, 0, 0]
+        const gradY = [0, 0, 0]
+        for (let k = 0; k < N_RING; k++) {
+          const a = (k * 2 * Math.PI) / N_RING
+          const cosA = Math.cos(a); const sinA = Math.sin(a)
+          for (let c = 0; c < 3; c++) {
+            const diff = sample(out, cx + cosA * rRing, cy + sinA * rRing, c) - sample(out, sx + cosA * rRing, sy + sinA * rRing, c)
+            meanOff[c] = (meanOff[c] as number) + diff / N_RING
+            gradX[c] = (gradX[c] as number) + (2 * diff * cosA) / (N_RING * rRing)
+            gradY[c] = (gradY[c] as number) + (2 * diff * sinA) / (N_RING * rRing)
+          }
+        }
+        for (let y = Math.floor(cy - r * 1.35); y <= Math.ceil(cy + r * 1.35); y++) {
+          for (let x = Math.floor(cx - r * 1.35); x <= Math.ceil(cx + r * 1.35); x++) {
             if (x < 0 || y < 0 || x >= w || y >= h) continue
-            const d = Math.hypot(x - cx, y - cy) / r
-            const a = d <= 0.8 ? 1 : d >= 1.3 ? 0 : 1 - (d - 0.8) / 0.5
+            const dx = x - cx; const dy = y - cy
+            const d = Math.hypot(dx, dy) / r
+            if (d >= 1.35) continue
+            const t = d <= 0.8 ? 0 : (d - 0.8) / 0.55
+            const a = 1 - t * t * (3 - 2 * t)
             if (a <= 0) continue
             const o = (y * w + x) * 3
             for (let c = 0; c < 3; c++) {
-              const v = sample(img, x + (sx - cx), y + (sy - cy), c) + (offs[c] as number)
+              const plane = (meanOff[c] as number) + ((gradX[c] as number) * dx + (gradY[c] as number) * dy) * 0.85
+              const v = sample(out, sx + dx, sy + dy, c) + plane
               out.data[o + c] = (out.data[o + c] as number) * (1 - a) + Math.max(0, v) * a
             }
           }
@@ -583,12 +734,17 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   {
     id: 'rotate', title: 'Straighten / rotate', category: 'geometry', geometry: true, maskable: false,
     description: 'Rotate by an arbitrary angle (positive = clockwise) with optional auto-crop to remove empty corners.',
-    params: obj({ angle: num(-45, 45, 0, 'degrees', 'deg'), crop: { type: 'boolean', default: true, description: 'crop to the largest inner rectangle' } }),
+    params: obj({
+      angle: num(-45, 45, 0, 'degrees', 'deg'),
+      crop: { type: 'boolean', default: true, description: 'crop to the largest inner rectangle' },
+      auto_crop: { type: 'boolean', description: 'alias for crop (crop to the largest inner rectangle)' },
+    }),
     apply: (img, p) => {
       const a = (p.angle * Math.PI) / 180
       if (Math.abs(a) < 1e-6) return img
       const { width: w, height: h } = img
-      const [cw, ch] = p.crop ? rotatedCrop(w, h, a) : [Math.abs(w * Math.cos(a)) + Math.abs(h * Math.sin(a)), Math.abs(w * Math.sin(a)) + Math.abs(h * Math.cos(a))]
+      const doCrop = p.auto_crop !== undefined ? p.auto_crop : p.crop
+      const [cw, ch] = doCrop ? rotatedCrop(w, h, a) : [Math.abs(w * Math.cos(a)) + Math.abs(h * Math.sin(a)), Math.abs(w * Math.sin(a)) + Math.abs(h * Math.cos(a))]
       const W = Math.max(8, Math.floor(cw)); const H = Math.max(8, Math.floor(ch))
       const cos = Math.cos(a); const sin = Math.sin(a)
       return warpTo(img, W, H, (x, y) => {
@@ -625,16 +781,23 @@ export const BUILTIN_OPS: BuiltinOp[] = [
   },
   {
     id: 'crop', title: 'Crop', category: 'geometry', geometry: true, maskable: false,
-    description: 'Crop to a normalized rectangle, or to an aspect ratio centered on (cx, cy).',
-    params: obj({ x: num(0, 1, 0, 'left'), y: num(0, 1, 0, 'top'), w: num(0.01, 1, 1, 'width'), h: num(0.01, 1, 1, 'height'), aspect: { type: 'string', description: 'e.g. "3:2", "16:9", "1:1", "4:5" — overrides w/h, keeps the largest centered rect' }, cx: num(0, 1, 0.5, 'center x for aspect crops'), cy: num(0, 1, 0.5, 'center y for aspect crops') }),
+    description: 'Crop to a normalized rectangle, or to an aspect ratio centered on (cx, cy) or within (x, y, w, h).',
+    params: obj({ x: num(0, 1, 0, 'left'), y: num(0, 1, 0, 'top'), w: num(0.01, 1, 1, 'width'), h: num(0.01, 1, 1, 'height'), aspect: { type: 'string', description: 'e.g. "3:2", "16:9", "1:1", "4:5", "free", "original"' }, cx: num(0, 1, 0.5, 'center x for aspect crops'), cy: num(0, 1, 0.5, 'center y for aspect crops') }),
     apply: (img, p) => {
       const { width: W, height: H } = img
       let x = p.x * W; let y = p.y * H; let w = p.w * W; let h = p.h * H
       if (typeof p.aspect === 'string' && /^\d+(\.\d+)?:\d+(\.\d+)?$/.test(p.aspect)) {
         const [a, b] = p.aspect.split(':').map(Number) as [number, number]
         const ratio = a / b
-        w = Math.min(W, H * ratio); h = w / ratio
-        x = Math.min(W - w, Math.max(0, p.cx * W - w / 2)); y = Math.min(H - h, Math.max(0, p.cy * H - h / 2))
+        const boxW = p.w * W
+        const boxH = p.h * H
+        w = Math.min(boxW, boxH * ratio)
+        h = w / ratio
+        const hasExplicitBox = p.x > 0 || p.y > 0 || p.w < 1 || p.h < 1
+        const centerX = (!hasExplicitBox || p.cx !== 0.5 ? p.cx : p.x + p.w / 2) * W
+        const centerY = (!hasExplicitBox || p.cy !== 0.5 ? p.cy : p.y + p.h / 2) * H
+        x = Math.min(W - w, Math.max(0, centerX - w / 2))
+        y = Math.min(H - h, Math.max(0, centerY - h / 2))
       }
       const X = Math.max(0, Math.round(x)); const Y = Math.max(0, Math.round(y))
       const WW = Math.max(1, Math.min(W - X, Math.round(w))); const HH = Math.max(1, Math.min(H - Y, Math.round(h)))

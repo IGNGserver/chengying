@@ -12,6 +12,7 @@ import { signature } from '../../core/edit/schema.ts'
 import { ChengyingError } from '../../core/util/errors.ts'
 import type { Project } from '../../core/project.ts'
 import { runDelivery } from '../deliver.ts'
+import { photoDiagnostics } from '../orchestrator.ts'
 
 const projectArg = str('Project id or workspace path (default: current workspace).')
 
@@ -145,7 +146,7 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
               viewPath = await svc.renderOriginal(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
               caption = `original (${firstEngine} RAW baseline)`
               const { imageStats } = await import('../../core/edit/service.ts')
-              baselineStats = await imageStats(viewPath)
+              baselineStats = await imageStats(viewPath, { faceBox: project.repo.features(shot.id)?.subject?.faceBox })
             } catch {
               viewPath = shot.previewPath
             }
@@ -156,14 +157,14 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
             note = r.reason
           }
         }
-        return { ...info, photo: shot === undefined ? undefined : { id: shot.id, context: rt.shotContext(project, shot), width: shot.width, height: shot.height, raw: shot.rawFile !== null, previewSource: shot.previewSource, baselineStats, scores: project.repo.scores(shot.id).technical?.detail, issues: project.repo.scores(shot.id).technical?.issues }, preferences: project.profile().styleNotes, look: project.profile().look, images, note }
+        return { ...info, photo: shot === undefined ? undefined : { id: shot.id, context: rt.shotContext(project, shot), width: shot.width, height: shot.height, raw: shot.rawFile !== null, previewSource: shot.previewSource, baselineStats, diagnostics: photoDiagnostics(project, shot.id), scores: project.repo.scores(shot.id).technical?.detail, issues: project.repo.scores(shot.id).technical?.issues }, preferences: project.profile().styleNotes, look: project.profile().look, images, note }
       },
     }),
 
-    defineTool<{ task?: string; project?: string; ops: EditOp[]; message?: string; preview?: boolean }>({
+    defineTool<{ task?: string; project?: string; ops: EditOp[]; message?: string; preview?: boolean; compare?: boolean }>({
       name: 'edit_apply',
-      description: `Edit the photo non-destructively. ${EDIT_OPS_DESCRIPTION}\nReturns the new revision, validation warnings (clamped values etc.) and, with preview=true (default), a rendered preview and statistics.`,
-      parameters: obj({ ...taskParam, ...extra, ops: arr(anyJson('edit operation'), 'operations'), message: str('Why (shown in the history).'), preview: bool('Render and show a preview (default true).') }, [...req, 'ops']),
+      description: `Edit the photo non-destructively. ${EDIT_OPS_DESCRIPTION}\nReturns the new revision, validation warnings (clamped values etc.) and, with preview=true (default), a rendered preview and statistics (pass compare=true for a side-by-side original | edited comparison image).`,
+      parameters: obj({ ...taskParam, ...extra, ops: arr(anyJson('edit operation'), 'operations'), message: str('Why (shown in the history).'), preview: bool('Render and show a preview (default true).'), compare: bool('Show side-by-side original | edited comparison image.') }, [...req, 'ops']),
       async run(args, exec) {
         const { project, taskId } = resolve(args, exec)
         const svc = rt.edit(project)
@@ -177,7 +178,8 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
           const r = await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
           out.stats = r.stats
           out.renderWarnings = r.warnings
-          const img = await rt.imageForModel(r.path, exec, { caption: `rev ${revision.seq}` })
+          const imgPath = args.compare === true ? (await svc.compare(taskId, { revisionId: revision.id, signal: exec.signal })).path : r.path
+          const img = await rt.imageForModel(imgPath, exec, { caption: args.compare === true ? `original | rev ${revision.seq}` : `rev ${revision.seq}` })
           out.images = img.image ? [img.image] : []
           if (img.reason) out.note = img.reason
         }
