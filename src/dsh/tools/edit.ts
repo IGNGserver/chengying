@@ -175,15 +175,11 @@ export function taskTools(rt: ChengyingRuntime, bound?: { projectId: string; tas
         if (maxRev > 0 && usedEdits >= maxRev - 1) warnings.push(`budget notice: ${Math.max(0, maxRev - usedEdits)} edit_apply iteration(s) remaining; finalize with edit_finish soon`)
         const out: Record<string, unknown> = { revision: { id: revision.id, seq: revision.seq, message: revision.message }, warnings, steps: revision.doc.stages.map((s, i) => ({ stage: i, engine: s.engine, steps: s.steps.map(x => ({ id: x.id, op: x.op, params: x.params, mask: x.mask === undefined ? undefined : true, enabled: x.enabled, instance: x.instance })) })) }
         if (args.preview !== false) {
-        if (args.preview !== false) {
           const r = await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
           out.stats = r.stats
           out.renderWarnings = r.warnings
           const imgPath = args.compare === true ? (await svc.compare(taskId, { revisionId: revision.id, signal: exec.signal })).path : r.path
           const img = await rt.imageForModel(imgPath, exec, { caption: args.compare === true ? `original | rev ${revision.seq}` : `rev ${revision.seq}` })
-          out.images = img.image ? [img.image] : []
-          if (img.reason) out.note = img.reason
-        }
           out.images = img.image ? [img.image] : []
           if (img.reason) out.note = img.reason
         }
