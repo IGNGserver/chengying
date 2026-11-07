@@ -93,7 +93,7 @@ export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
 
     defineTool<{ engine: string; tool: string; arguments?: Record<string, unknown> }>({
       name: 'edit_native',
-      description: 'Call an engine-native tool directly (e.g. darktable-mcp tools such as image_stats, get_metadata, list_styles, decode_params when the installed darktable provides darktable-mcp). File paths are checked: inputs must be readable, outputs land in Chengying\'s scratch/export directories.',
+      description: 'Call an engine-native tool directly (e.g. darktable-mcp tools such as image_stats, get_metadata, list_styles, decode_params when the installed darktable provides darktable-mcp). File paths are checked: inputs must be readable, outputs land in Chengying\'s scratch/export directories. For built-in engines, supports "image_stats" (returns detailed analysis: p05, p50, p95, localContrast, colorCast, faceStats) and "render".',
       parameters: obj({ engine: str('Engine id.'), tool: str('Native tool name (see edit_engines nativeTools).'), arguments: anyJson('Native tool arguments.') }, ['engine', 'tool']),
       async run(args, exec) {
         const e = rt.engines().get(args.engine)

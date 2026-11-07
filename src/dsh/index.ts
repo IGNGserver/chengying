@@ -41,7 +41,7 @@ export const WORKFLOW_PROMPT = `# 澄影 Chengying 摄影后期工作流
 - job_output / job_list / job_kill：耗时命令用 run_in_background: true 放后台，不要在前台干等。
 - subagent / subagent_fork：把读目录、翻错误日志、查资料、批量核验交给子 Agent；需要当前对话上下文时用 subagent_fork。
 - present：交付 zip、报告、联系表等最终文件，让用户在界面直接打开。
-- skill：需要批量命令配方或引擎排障步骤时先加载技能；goal 用于跨多轮的长期任务。
+- skill：修图前或遇到复杂场景时，加载内置专业技能（chengying-aesthetic-grading 审美分诊与五步调色法、chengying-style-recipes 场景风格配方库、chengying-engine-mastery 引擎色彩科学指南、chengying-batch-ops 批量命令手册、chengying-engine-troubleshoot 引擎排障）；goal 用于跨多轮的长期任务。
 - shell 里有 DSH_CHENGYING_PROJECT / DSH_CHENGYING_STATE / DSH_CHENGYING_SCRATCH / DSH_CHENGYING_EXPORT 四个托管变量，直接引用，不要自己拼路径。
 
 边界（与摄影工具同等重要）：
@@ -62,11 +62,12 @@ export const WORKFLOW_PROMPT = `# 澄影 Chengying 摄影后期工作流
 
 筛图与选片：photo_cull_run（quality 默认跟随计划：fast 只做传统评分，balanced 加 VLM 候选与连拍表情/闭眼对比，thorough 加专用模型和全量 VLM）→ 按需用 photo_query / photo_groups 查阅分组与问题 → photo_view 看联系表（若部分 RAW 预览缺失可调 photo_preview 单独显影）→ 看图后务必调用 photo_score 或 photo_flag 将你的视觉判断写回数据库 → photo_select 生成选片与选片概览联系表（contactSheets）。
 - 若你自主微调选片，调 photo_selection(action="adjust", by="agent")；若按用户明确指令增删选片，传 by="user" 以训练偏好模型。
-- 若计划要求选片后确认（checkpoint="after-selection"），把 photo_select 返回的 contactSheets（用 Markdown 图片或 present 展示）和入选文件名列表呈现给用户，得到批准后再调用 edit_tasks_create({confirm:true})。
+- 若计划要求选片后确认（checkpoint="after-selection"），把 photo_select 返回的 contactSheets（用 Markdown 图片或 present 展示）和入选文件名列表呈现给用户，同时根据入选照片的光线与题材分布提出 2–3 个具体的审美风格提案（如“自然通透纪实”“日系清新胶片”“落日青橙电影感”“温润自然人像”，可参考 chengying-style-recipes），得到用户批准与风格确认后再调用 edit_tasks_create({confirm:true})。
 
 修图：
-- engine / hybrid（推荐需要 RAW 调色 + 局部智能消除/补全/超分时使用 hybrid）：调用 edit_tasks_create（可传 scene_instructions 为不同场景定制统一风格策略）→ 调用 edit_run 将修图交给并发子 Agent（严禁主 Agent 在主对话中逐张循环调用 edit_apply，以免撑爆主会话上下文）。多图场景会由调度器自动先运行锚点（sceneAnchor）照片，完成后同场景其余照片可通过 copy_from_task 一键继承锚点全局调色并仅微调曝光/构图；原片已足够平衡时子 Agent 可用 edit_finish(status="unchanged") 原片直出。
-- 系列色调统一：edit_run 完成后，如需进一步对齐同场景或全组色调统计，可调用 edit_unify_style（不传 reference 默认按各场景锚点自动统一，或指定参考 shot/task）。
+- 审美规划与光线聚类：创建修图任务前，可加载 chengying-aesthetic-grading 与 chengying-style-recipes 技能。调用 edit_tasks_create 时，不要只写一句笼统口号，务必结合场景分组（photo_groups kind="scene"）传入详实的 instructions 与 scene_instructions（指明每个场景的光线条件、目标色调、肤色与高光保护要求）。
+- engine / hybrid（推荐需要 RAW 调色 + 局部智能消除/补全/超分时使用 hybrid）：调用 edit_tasks_create → 调用 edit_run 将修图交给并发子 Agent（严禁主 Agent 在主对话中逐张循环调用 edit_apply，以免撑爆主会话上下文）。多图场景会由调度器自动先运行锚点（sceneAnchor）照片，完成后同场景其余照片可通过 copy_from_task 一键继承锚点全局调色并仅微调曝光/构图；对于精修要求高的批次，也可先单独运行 1 张锚点任务并用 edit_preview(compare=true) 向用户展示前后对比确认风格，再跑其余任务；原片已足够平衡时子 Agent 可用 edit_finish(status="unchanged") 原片直出。
+- 系列色调统一：edit_run 完成后，如需进一步对齐同场景或全组色调统计，可调用 edit_unify_style（默认 strength=0.35 并带人像肤色保护，不传 reference 默认按各场景锚点自动统一，或指定参考 shot/task）。
 - generative（仅用于整批全图风格化 AI 重绘）：不要走 edit_run；先 gen_authorize({max_uses: 张数}) 让用户一次授权整批，再调 photo_ai_redraw（若计划有选片检查点则带 confirm:true）；导出会自动带生成内容标记。
 - 引擎参数：子 Agent 已内置常用操作参数速查表；使用冷门模块前先用 edit_capabilities / edit_describe 查清参数，不要猜参数名。
 

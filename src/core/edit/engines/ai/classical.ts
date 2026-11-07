@@ -286,7 +286,9 @@ export function applyStyle(img: FImage, ref: StyleFingerprint, opts: StyleOption
   for (let j = 0; j < img.data.length; j += 3) {
     const lab = linToLab(img.data[j] as number, img.data[j + 1] as number, img.data[j + 2] as number)
     let [L, A, B] = lab
-    const w = protect ? smooth(2, 12, L) * (1 - smooth(85, 99, L)) : 1
+    // Protect extremes and skin hues (A in 5..20, B in 10..25)
+    const skin = (A > 5 && A < 25 && B > 8 && B < 30) ? 0.2 : 1
+    const w = protect ? smooth(2, 12, L) * (1 - smooth(85, 99, L)) * skin : 1
     if (opts.tone) {
       const mappedL = mapL(L)
       // Cap extreme quantile jumps when strength < 1 so local contrast is not torn
