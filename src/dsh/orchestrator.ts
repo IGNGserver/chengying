@@ -81,76 +81,44 @@ export function engineCheatSheet(engines: readonly string[]): string {
   const blocks: string[] = []
   if (unique.includes('builtin')) {
     blocks.push(
-<<<<<<< HEAD
-      `Core "builtin" operations (exact schemas — use directly in edit_apply without calling edit_describe):
-  - exposure: { ev: -6..6 (default 0, typical step ±0.15..1.0) } (maskable)
-  - white_balance: { temperature: -100..100 (0, +warmer), tint: -100..100 (0, +magenta) } (maskable)
-  - tone: { contrast: -100..100 (0), highlights: -100..100 (0), shadows: -100..100 (0), whites: -100..100 (0), blacks: -100..100 (0), brightness?: -100..100 (0) } (maskable)
-  - curve: { points?: [[x,y],...], channel?: "luma"|"rgb"|"red"|"green"|"blue", red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...] } (x,y in 0..1) (maskable)
-  - saturation: { saturation: -100..100 (0), vibrance: -100..100 (0) } (maskable)
-  - hsl: { red|orange|yellow|green|aqua|blue|purple|magenta: { hue?: -100..100, saturation?: -100..100, luminance?: -100..100 } } (maskable)
-  - color_grading: { shadows?: { hue: 0..360, saturation: 0..100 }, midtones?: { hue: 0..360, saturation: 0..100 }, highlights?: { hue: 0..360, saturation: 0..100 }, balance?: -100..100 } (maskable)
-  - clarity: { amount: -100..100 (0), radius?: 2..200 (30) } · dehaze: { amount: -100..100 (0) } (maskable)
-  - denoise: { luminance?: 0..100 (0), chroma?: 0..100 (25), detail?: 0..100 (50) } · sharpen: { amount?: 0..300 (60), radius?: 0.3..5 (1), threshold?: 0..50 (2), masking?: 0..100 (0) } (maskable)
-  - vignette: { amount: -100..100 (0, e.g. -25), midpoint?: 0..100 (50), roundness?: -100..100 (0), feather?: 0..100 (50) } (maskable)
-  - heal: { spots: [{ x: 0..1, y: 0..1, r: 0.001..0.2 (0.01), src_x?: 0..1, src_y?: 0..1 }] } (spot blemish/dust removal, no mask)
-  - rotate: { angle: -45..45 (deg, +clockwise), crop?: true } · crop: { x?: 0..0.95, y?: 0..0.95, w?: 0.01..1, h?: 0.01..1, aspect?: "free"|"original"|"1:1"|"3:2"|"2:3"|"4:3"|"3:4"|"4:5"|"16:9"|"9:16", cx?: 0..1, cy?: 0..1 } · perspective: { vertical?: -100..100, horizontal?: -100..100, scale?: 50..150, crop?: true } (geometry ops: applied in step order, no mask)`,
-=======
       `Core "builtin" operations (exact schemas & aesthetic safe ranges — use directly in edit_apply without calling edit_describe):
   - exposure: { ev: -6..6 (default 0, typical step ±0.15..0.8, strictly bounded by shadowEv headroom) } (maskable)
   - white_balance: { temperature: -100..100 (0, typical ±3..15, +warmer), tint: -100..100 (0, typical ±2..8, +magenta) } (maskable)
   - tone: { contrast: -100..100 (0, typical -12..+16), highlights: -100..100 (0, typical -45..-15 to recover), shadows: -100..100 (0, typical +10..+30), whites: -100..100 (0, typical -8..+12), blacks: -100..100 (0, typical -15..+10), brightness?: -100..100 (0) } (maskable)
-  - curve: { points?: [[x,y],...], red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...], channel?: "luma"|"rgb"|"red"|"green"|"blue" } (x,y in 0..1; primary tool for film roll-off and split-toning: e.g. blue [[0,0.02],[0.25,0.28],[0.75,0.73],[1,0.97]] + red [[0,0],[0.25,0.23],[0.75,0.77],[1,1]]) (maskable)
+  - curve: { points?: [[x,y],...], channel?: "luma"|"rgb"|"red"|"green"|"blue", red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...] } (x,y in 0..1; primary tool for film roll-off and split-toning: e.g. blue [[0,0.02],[0.25,0.28],[0.75,0.73],[1,0.97]] + red [[0,0],[0.25,0.23],[0.75,0.77],[1,1]]) (maskable)
   - saturation: { saturation: -100..100 (0, typical -6..+4; NEVER > +8 on portraits), vibrance: -100..100 (0, typical +5..+18, protects skin) } (maskable)
   - hsl: { red|orange|yellow|green|aqua|blue|purple|magenta: { hue?: -100..100, saturation?: -100..100, luminance?: -100..100 } } (portrait skin: orange luminance +6..+12, saturation -4..-10; foliage cleanup: yellow/green saturation -15..-35, green hue +8..+20) (maskable)
   - color_grading: { shadows?: { hue: 0..360, saturation: 0..100 }, midtones?: { hue: 0..360, saturation: 0..100 }, highlights?: { hue: 0..360, saturation: 0..100 }, balance?: -100..100 } (keep saturation 8..20 for subtle split-toning) (maskable)
   - clarity: { amount: -100..100 (0, typical +8..+15 on landscape/urban; NEVER > 0 on portraits, use -5..-10 for soft light), radius?: 2..200 (30) } · dehaze: { amount: -100..100 (0, typical +5..+12 on hazy landscapes; NEVER > +15 or on overcast/indoors/portraits) } (maskable)
   - denoise: { luminance?: 0..100 (0, use 20..35 on high ISO), chroma?: 0..100 (25), detail?: 0..100 (50) } · sharpen: { amount?: 0..300 (60), radius?: 0.3..5 (1), threshold?: 0..50 (2), masking?: 0..100 (40) } (maskable)
   - vignette: { amount: -100..100 (0, typical -8..-18), midpoint?: 0..100 (50), roundness?: -100..100 (0), feather?: 0..100 (55) } (maskable)
-  - rotate: { angle: -45..45 (deg, +clockwise), crop?: true } · crop: { x?: 0..1, y?: 0..1, w?: 0.01..1, h?: 0.01..1, aspect?: "3:2"|"16:9"|"1:1"|"4:5", cx?: 0..1, cy?: 0..1 } · perspective: { vertical?: -100..100, horizontal?: -100..100 } (geometry ops: applied in step order, no mask; do NOT rotate/crop unless measured tilt or edge distraction requires it)`,
->>>>>>> 232831c (feat(aesthetic): complete retouch quality upgrade)
+  - heal: { spots: [{ x: 0..1, y: 0..1, r: 0.001..0.2 (0.01), src_x?: 0..1, src_y?: 0..1 }] } (spot blemish/dust removal, no mask)
+  - rotate: { angle: -45..45 (deg, +clockwise), crop?: true } · crop: { x?: 0..0.95, y?: 0..0.95, w?: 0.01..1, h?: 0.01..1, aspect?: "free"|"original"|"1:1"|"3:2"|"2:3"|"4:3"|"3:4"|"4:5"|"16:9"|"9:16", cx?: 0..1, cy?: 0..1 } · perspective: { vertical?: -100..100, horizontal?: -100..100, scale?: 50..150, crop?: true } (geometry ops: applied in step order, no mask; do NOT rotate/crop unless measured tilt or edge distraction requires it)`,
     )
   }
   if (unique.includes('darktable')) {
     blocks.push(
-<<<<<<< HEAD
-      `Core "darktable" operations (scene-referred workflow — prefer these modern modules; avoid stacking legacy basecurve/levels/shadhi on top):
-  - exposure: { exposure: -4..4 (EV, default 0), black?: -0.1..0.1 (0) } (maskable)
-  - colorbalancergb: { chroma_global?: -1..1 (0), vibrance?: -1..1 (0), contrast?: -1..1 (0), saturation_global?: -1..1 (0), brilliance_shadows?: -1..1 (0), brilliance_midtones?: -1..1 (0), brilliance_highlights?: -1..1 (0) } (maskable)
-  - channelmixerrgb: { temperature?: 1667..25000 (5003, K), illuminant?: "DT_ILLUMINANT_D"|"DT_ILLUMINANT_BB"|"DT_ILLUMINANT_CAMERA", gamut?: 0..12 (1) } (scene-referred color calibration / white balance, maskable)
-  - toneequal: { blacks?: -2..2 (0), shadows?: -2..2 (0), midtones?: -2..2 (0), highlights?: -2..2 (0), whites?: -2..2 (0) } (zone exposure recovery, maskable)
-  - tonecurve: { curves: { L?: [[0,0],[0.25,0.22],[0.75,0.78],[1,1]], a?: [...], b?: [...] } } (high-level spline points in 0..1, maskable)
-  - rgbcurve: { curves: { master?: [[0,0],...,[1,1]], r?: [...], g?: [...], b?: [...] } } (maskable)
-  - sigmoid: { middle_grey_contrast?: 0.1..10 (1.5), contrast_skewness?: -1..1 (0) }
-  - denoiseprofile: { strength?: 0.001..10 (1), shadows?: 0..1.8 (1) } · diffuse: { iterations?: 1..16 (1), sharpness?: -1..1 (0), radius?: 0..2048 (8) } (maskable)
-  - crop: { cx: 0..1 (0, left), cy: 0..1 (0, top), cw: 0..1 (1, right), ch: 0..1 (1, bottom) } (also accepts aliases left/top/right/bottom, no mask)
-=======
       `Core "darktable" operations (scene-referred workflow — prefer these modern modules; avoid legacy basecurve/levels/shadhi/tonecurve on top of darktable-default):
   - exposure: { exposure: -4..4 (EV, default 0, typical ±0.15..0.8), black?: -0.1..0.1 (0, typical -0.01..0.01) } (maskable)
   - colorbalancergb: { chroma_global?: -1..1 (0, typical 0.02..0.12), vibrance?: -1..1 (0, typical 0.05..0.15), contrast?: -1..1 (0, typical -0.08..0.12), saturation_global?: -1..1 (0), brilliance_shadows?: -1..1 (0, typical 0.06..0.22), brilliance_midtones?: -1..1 (0), brilliance_highlights?: -1..1 (0, typical -0.18..-0.05) } (maskable)
+  - channelmixerrgb: { temperature?: 1667..25000 (5003, K), illuminant?: "DT_ILLUMINANT_D"|"DT_ILLUMINANT_BB"|"DT_ILLUMINANT_CAMERA", gamut?: 0..12 (1) } (scene-referred color calibration / white balance, maskable)
+  - toneequal: { blacks?: -2..2 (0), shadows?: -2..2 (0), midtones?: -2..2 (0), highlights?: -2..2 (0), whites?: -2..2 (0) } (zone exposure recovery, maskable)
   - rgbcurve: { curves: { master?: [[0,0],...,[1,1]], r?: [...], g?: [...], b?: [...] } } (high-level spline points in 0..1 for subtle S-curve or R/B split-toning, maskable)
   - colorzones: { curves: { lightness?: [[x,y],...], saturation?: [[x,y],...], hue?: [[x,y],...] } } (targeted HSL spline in 0..1, maskable)
   - sigmoid: { middle_grey_contrast?: 0.1..10 (1.5, typical 1.25..1.6), contrast_skewness?: -1..1 (0; keep 0 on portraits) }
-  - crop: { left: 0..1 (0), top: 0..1 (0), right: 0..1 (1), bottom: 0..1 (1) } (no mask)
->>>>>>> 232831c (feat(aesthetic): complete retouch quality upgrade)
+  - denoiseprofile: { strength?: 0.001..10 (1), shadows?: 0..1.8 (1) } · diffuse: { iterations?: 1..16 (1), sharpness?: -1..1 (0), radius?: 0..2048 (8) } (maskable)
+  - crop: { cx: 0..1 (0, left), cy: 0..1 (0, top), cw: 0..1 (1, right), ch: 0..1 (1, bottom) } (no mask)
   - ashift: { rotation: -45..45 (deg), lensshift_v?: -1..1 (0), lensshift_h?: -1..1 (0) }`,
     )
   }
   if (unique.includes('rawtherapee')) {
     blocks.push(
       `Core "rawtherapee" operations (pp3 sections — partial params merge over the base profile; local edits MUST use "Locallab" spots[], never step.mask):
-<<<<<<< HEAD
-  - Exposure: { Auto?: false, Compensation?: -5..5 (EV), Brightness?: -100..100, Contrast?: -100..100, Saturation?: -100..100, HighlightCompr?: 0..100, ShadowCompr?: 0..100 }
-  - White Balance: { Setting?: "Camera"|"autitcgreen"|"Custom" (or "Auto"), Temperature?: 1500..60000, Green?: 0.02..10 }
-  - Shadows & Highlights: { Enabled: true, Highlights?: 0..100, Shadows?: 0..100 }
-  - Crop: { Enabled: true, X: 0..1, Y: 0..1, W: 0..1, H: 0..1 } · Rotation: { Degree: -45..45 }`,
-=======
   - Exposure: { Auto?: false, Compensation?: -5..5 (EV, typical ±0.15..0.8), Brightness?: -100..100, Contrast?: -100..100 (typical -10..+18), Saturation?: -100..100, HighlightCompr?: 0..100 (typical 20..45), ShadowCompr?: 0..100 (typical 15..35) }
   - White Balance: { Setting?: "Camera"|"Auto"|"Custom", Temperature?: 1500..60000, Green?: 0.02..10 }
   - Shadows & Highlights: { Enabled: true, Highlights?: 0..100 (typical 15..35), Shadows?: 0..100 (typical 15..35) }
   - Vibrance: { Enabled: true, Pastels?: -100..100 (typical 8..20), Saturated?: -100..100 (typical 0..10), ProtectSkins?: true }
   - Crop: { Enabled: true, X: 0..1, Y: 0..1, W: 0..1, H: 0..1 } · Rotation: { Degrees: -45..45 }`,
->>>>>>> 232831c (feat(aesthetic): complete retouch quality upgrade)
     )
   }
   if (unique.includes('ai')) {
