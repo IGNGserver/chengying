@@ -8,7 +8,7 @@
  * full edit document + each engine's native sidecar) is written beside the
  * exports in _recipes/.
  */
-import { copyFileSync, existsSync, mkdirSync, utimesSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, rmSync, utimesSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { Project } from '../project.ts'
 import type { EditService } from '../edit/service.ts'
@@ -191,8 +191,8 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
         if (opts.c2pa === true) {
           c2paSigned = false
           const c2paBin = process.env.CHENGYING_C2PATOOL ?? 'c2patool'
+          const signedTmp = project.guard.writable(`${out.path}.c2pa.${ext}`)
           try {
-            const signedTmp = project.guard.writable(`${out.path}.c2pa.${ext}`)
             const r = await run(c2paBin, [out.path, '-m', c2paManifestPath, '-o', signedTmp, '-f'], { timeoutMs: 60_000, signal: opts.signal })
             if (r.code === 0 && existsSync(signedTmp)) {
               copyFileSync(signedTmp, out.path)
@@ -200,6 +200,8 @@ export async function exportPhotos(project: Project, edit: EditService, opts: Ex
             }
           } catch {
             c2paSigned = false
+          } finally {
+            rmSync(signedTmp, { force: true })
           }
         }
       }

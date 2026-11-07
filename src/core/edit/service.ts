@@ -6,17 +6,19 @@
  * before/after comparisons. Originals are only ever read.
  */
 import sharp from 'sharp'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Project } from '../project.ts'
 import type { EngineRegistry } from './registry.ts'
 import type { EditDocument, EditStage, EditStep, MaskSpec, RevisionRecord, Shot, TaskRecord, TaskStatus } from '../types.ts'
+import { fingerprintOf } from './engine.ts'
 import { mergeParams } from './schema.ts'
 import { generateWith, type GenerativeProvider } from './generative.ts'
 import { loadImage, saveImage } from './engines/builtin/image.ts'
 import { rasterizeMask } from './engines/builtin/masks.ts'
 import { styleFingerprint, type StyleFingerprint } from './engines/ai/classical.ts'
 import { loadAsset, writeMaskPng } from './engines/ai/index.ts'
+import { rgbToLab } from '../analysis/pixels.ts'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
 import { newId, nowIso, round } from '../util/misc.ts'
 
@@ -43,6 +45,9 @@ export interface ImageStats {
   clipLow: number
   histogram: number[]
   saturation: number
+  zones?: { shadows: number; midtones: number; highlights: number }
+  cast?: { a: number; b: number }
+  faceLuma?: number
 }
 
 export interface RenderOutcome {
@@ -58,16 +63,45 @@ export interface RenderOutcome {
 
 const ACTIVE: TaskStatus[] = ['queued', 'running', 'paused', 'waiting-authorization']
 
-export async function imageStats(path: string): Promise<ImageStats> {
-  const { data, info } = await sharp(path).resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true }).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+export async function imageStats(path: string, opts?: { faceBox?: [number, number, number, number] }): Promise<ImageStats> {
+  const { data, info } = await sharp(path, { failOn: 'none' })
+    .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
+    .toColourspace('srgb')
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true })
   const n = info.width * info.height
+  const is16 = data.byteLength >= n * 6
+  const u16 = is16 ? new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2) : undefined
   let r = 0; let g = 0; let b = 0; let hi = 0; let lo = 0; let sat = 0
+  let shSum = 0; let shN = 0; let midSum = 0; let midN = 0; let hlSum = 0; let hlN = 0
+  let castA = 0; let castB = 0; let castN = 0; let allA = 0; let allB = 0; let labSampled = 0
+  let faceSum = 0; let faceN = 0
+  const fb = opts?.faceBox
+  const fx0 = fb ? Math.floor(fb[0] * info.width) : -1
+  const fy0 = fb ? Math.floor(fb[1] * info.height) : -1
+  const fx1 = fb ? Math.ceil((fb[0] + fb[2]) * info.width) : -1
+  const fy1 = fb ? Math.ceil((fb[1] + fb[3]) * info.height) : -1
+  const labStep = Math.max(1, Math.floor(n / 8000))
   const hist = new Array<number>(256).fill(0)
   for (let i = 0, j = 0; i < n; i++, j += 3) {
-    const R = data[j] as number; const G = data[j + 1] as number; const B = data[j + 2] as number
+    const R = u16 !== undefined ? Math.round((u16[j] as number) / 257) : (data[j] as number)
+    const G = u16 !== undefined ? Math.round((u16[j + 1] as number) / 257) : (data[j + 1] as number)
+    const B = u16 !== undefined ? Math.round((u16[j + 2] as number) / 257) : (data[j + 2] as number)
     r += R; g += G; b += B
-    const y = Math.round(0.2126 * R + 0.7152 * G + 0.0722 * B)
+    const y = Math.min(255, Math.max(0, Math.round(0.2126 * R + 0.7152 * G + 0.0722 * B)))
     hist[y] = (hist[y] ?? 0) + 1
+    if (y < 64) { shSum += y; shN++ } else if (y < 192) { midSum += y; midN++ } else { hlSum += y; hlN++ }
+    if (fb !== undefined) {
+      const px = i % info.width
+      const py = (i - px) / info.width
+      if (px >= fx0 && px < fx1 && py >= fy0 && py < fy1) { faceSum += y; faceN++ }
+    }
+    if (i % labStep === 0) {
+      const [L, A, B_lab] = rgbToLab(R, G, B)
+      allA += A; allB += B_lab; labSampled++
+      if (Math.hypot(A, B_lab) < 14 && L > 15 && L < 95) { castA += A; castB += B_lab; castN++ }
+    }
     const mx = Math.max(R, G, B); const mn = Math.min(R, G, B)
     if (mx >= 254) hi++
     if (mx <= 2) lo++
@@ -76,7 +110,8 @@ export async function imageStats(path: string): Promise<ImageStats> {
   const pct = (p: number): number => { let acc = 0; for (let i = 0; i < 256; i++) { acc += hist[i] as number; if (acc >= n * p) return i } return 255 }
   const coarse: number[] = []
   for (let i = 0; i < 16; i++) coarse.push(round(hist.slice(i * 16, i * 16 + 16).reduce((a, x) => a + x, 0) / n * 100, 2))
-  const meta = await sharp(path).metadata()
+  const meta = await sharp(path, { failOn: 'none' }).metadata()
+  const useNeutral = castN > labSampled * 0.03
   return {
     width: meta.width ?? info.width,
     height: meta.height ?? info.height,
@@ -86,6 +121,16 @@ export async function imageStats(path: string): Promise<ImageStats> {
     clipLow: round(lo / n * 100, 2),
     histogram: coarse,
     saturation: round(sat / n * 100, 1),
+    zones: {
+      shadows: shN > 0 ? round(shSum / shN, 1) : 0,
+      midtones: midN > 0 ? round(midSum / midN, 1) : 0,
+      highlights: hlN > 0 ? round(hlSum / hlN, 1) : 0,
+    },
+    cast: labSampled > 0 ? {
+      a: round(useNeutral ? castA / castN : allA / labSampled, 2),
+      b: round(useNeutral ? castB / castN : allB / labSampled, 2),
+    } : undefined,
+    ...(faceN > 0 ? { faceLuma: round(faceSum / faceN, 1) } : {}),
   }
 }
 
@@ -310,6 +355,7 @@ export class EditService {
           break
         }
         case 'copy_from_task': {
+          const srcTask = this.task(o.task_id)
           const srcRev = this.head(o.task_id)
           const GEOM_OPS = new Set(['crop', 'rotate', 'perspective', 'flip', 'ashift', 'Crop', 'Rotation', 'Perspective', 'Distortion', 'Framing'])
           let copiedCount = 0
@@ -330,8 +376,24 @@ export class EditService {
               doc.stages.push(dstStage)
             }
             const cloned = eligible.map(st => ({ ...structuredClone(st), id: newId('st') }))
-            dstStage.steps = o.replace === true ? cloned : [...dstStage.steps, ...cloned]
+            if (o.replace === true) {
+              dstStage.steps = cloned
+            } else {
+              for (const cl of cloned) {
+                const existingIdx = cl.mask === undefined
+                  ? dstStage.steps.findIndex(existing => existing.op === cl.op && existing.mask === undefined && (existing.instance ?? 0) === (cl.instance ?? 0))
+                  : -1
+                if (existingIdx >= 0) dstStage.steps[existingIdx] = { ...cl, id: dstStage.steps[existingIdx]!.id }
+                else dstStage.steps.push(cl)
+              }
+            }
             copiedCount += cloned.length
+          }
+          const srcFeat = this.project.repo.features(srcTask.shotId)
+          const dstFeat = this.project.repo.features(task.shotId)
+          if (srcFeat?.exposure.median !== undefined && dstFeat?.exposure.median !== undefined && Math.abs(dstFeat.exposure.median - srcFeat.exposure.median) > 0.06) {
+            const deltaEv = round(Math.log2(Math.max(0.04, srcFeat.exposure.median) / Math.max(0.04, dstFeat.exposure.median)) * 0.7, 2)
+            warnings.push(`scene exposure hint: this frame's baseline median luminance (${round(dstFeat.exposure.median * 255, 0)}) differs from anchor ${srcTask.shotId} (${round(srcFeat.exposure.median * 255, 0)}); consider adjusting exposure by ${deltaEv >= 0 ? `+${deltaEv}` : deltaEv} EV relative to the copied anchor recipe`)
           }
           summary.push(`copy ${copiedCount} step(s) from ${o.task_id}`)
           break
@@ -391,11 +453,12 @@ export class EditService {
     const isPreview = opts.output === undefined
     const finalPath = opts.output ?? join(dir, `${rev.id}-${edge ?? 'full'}.${format === 'tiff' ? 'tif' : format === 'png' ? 'png' : 'jpg'}`)
     this.project.guard.writable(finalPath)
+    const shot = this.project.repo.shot(task.shotId) as Shot
     if (isPreview && existsSync(finalPath)) {
-      const st = await imageStats(finalPath)
+      const faceBox = this.project.repo.features(shot.id)?.subject?.faceBox
+      const st = await imageStats(finalPath, { faceBox })
       return { path: finalPath, width: st.width, height: st.height, cached: true, durationMs: 0, warnings: [], stats: st, stages: [] }
     }
-    const shot = this.project.repo.shot(task.shotId) as Shot
     try {
       const out = await this.renderDoc(shot, rev.doc, { ...opts, output: finalPath, taskId })
       if (isPreview) this.project.repo.setRevisionPreview(rev.id, out.path, out.stats as unknown as Record<string, unknown>)
@@ -457,7 +520,8 @@ export class EditService {
         input = r.output
         inputKind = 'raster'
       }
-      const stats = await imageStats(input)
+      const faceBox = this.project.repo.features(shot.id)?.subject?.faceBox
+      const stats = await imageStats(input, { faceBox })
       return { path: input, width: stats.width, height: stats.height, cached: false, durationMs: Date.now() - started, warnings, stats, stages }
     } finally {
       rmSync(scratch, { recursive: true, force: true })
@@ -476,13 +540,14 @@ export class EditService {
     const edge = opts.maxEdge ?? 900
     const dir = this.project.path('renders', taskId)
     mkdirSync(dir, { recursive: true })
-    const out = this.project.guard.writable(join(dir, `original-${edge}.jpg`))
-    if (existsSync(out)) return out
     const head = this.head(taskId)
     const first = head.doc.stages[0]
     const primary = this.project.repo.file(shot.primaryFile)
     const kind = primary?.kind === 'raw' ? 'raw' : 'raster'
     const engine = first?.engine ?? task.engine ?? (await this.engines.pick(kind))
+    const optTag = first?.options && Object.keys(first.options).length > 0 ? `-${fingerprintOf([JSON.stringify(first.options)]).slice(0, 6)}` : ''
+    const out = this.project.guard.writable(join(dir, `original-${engine}-${edge}${optTag}.jpg`))
+    if (existsSync(out)) return out
     const doc: EditDocument = {
       ...head.doc,
       stages: [{ id: `stage_original_${engine}`, engine, steps: [], ...(first?.options !== undefined ? { options: first.options } : {}) }],
@@ -621,15 +686,62 @@ export class EditService {
           }
         }
       }
-      const asset = join(dir, `${newId('gen')}.png`)
+      const genId = newId('gen')
+      const asset = join(dir, `${genId}.png`)
+      let patchAsset: string | undefined
+      let normCropBox: [number, number, number, number] | undefined
       let out: { path: string; detail: Record<string, unknown> }
-      if (cropBox !== undefined && maskPath !== undefined) {
+      if (cropBox !== undefined && maskPath !== undefined && rawMask !== undefined) {
         const cropImgPath = join(scratch, 'crop-in.png')
         const cropMaskPath = join(scratch, 'crop-mask.png')
         await sharp(base.path).extract(cropBox).png().toFile(cropImgPath)
         await sharp(maskPath).extract(cropBox).png().toFile(cropMaskPath)
         out = await generateWith(opts.provider, { image: cropImgPath, mask: cropMaskPath, prompt: opts.prompt, kind: opts.kind, width: cropBox.width, height: cropBox.height, outDir: scratch, signal: opts.signal })
-        const patch = await loadAsset(out.path, cropBox.width, cropBox.height)
+        const outMeta = await sharp(out.path, { failOn: 'none' }).metadata().catch(() => undefined)
+        const patchW = Math.max(cropBox.width, Math.min(2048, outMeta?.width ?? cropBox.width))
+        const patchH = Math.max(cropBox.height, Math.min(2048, Math.round(patchW * (cropBox.height / cropBox.width))))
+        const hiPatch = await loadAsset(out.path, patchW, patchH)
+        const patch = patchW === cropBox.width && patchH === cropBox.height ? hiPatch : await loadAsset(out.path, cropBox.width, cropBox.height)
+        // Measure unmasked context pixels (rawMask <= 0.05) to compensate subtle VAE/provider exposure & colour drift
+        let ctxSumSrc = [0, 0, 0]; let ctxSumDst = [0, 0, 0]; let ctxAbsDiff = 0; let ctxN = 0
+        for (let y = 0; y < cropBox.height; y++) {
+          for (let x = 0; x < cropBox.width; x++) {
+            const mVal = rawMask[(cropBox.top + y) * img.width + (cropBox.left + x)] as number
+            if (mVal > 0.05) continue
+            const dst = ((cropBox.top + y) * img.width + (cropBox.left + x)) * 3
+            const src = (y * cropBox.width + x) * 3
+            for (let c = 0; c < 3; c++) {
+              const dv = img.data[dst + c] as number
+              const sv = patch.data[src + c] as number
+              ctxSumDst[c] = (ctxSumDst[c] as number) + dv
+              ctxSumSrc[c] = (ctxSumSrc[c] as number) + sv
+              ctxAbsDiff += Math.abs(dv - sv)
+            }
+            ctxN++
+          }
+        }
+        // Only apply drift compensation when the unmasked context clearly represents the same image with a slight shift (< 0.14 linear diff)
+        if (ctxN >= 32) {
+          const meanDiff = ctxAbsDiff / (ctxN * 3)
+          if (meanDiff > 0.001 && meanDiff < 0.14) {
+            const offsets = [0, 1, 2].map(c => Math.max(-0.06, Math.min(0.06, ((ctxSumDst[c] as number) - (ctxSumSrc[c] as number)) / ctxN)))
+            for (const buf of patch === hiPatch ? [patch] : [patch, hiPatch]) {
+              for (let i = 0; i < buf.data.length; i += 3) {
+                buf.data[i] = Math.max(0, Math.min(1, (buf.data[i] as number) + (offsets[0] as number)))
+                buf.data[i + 1] = Math.max(0, Math.min(1, (buf.data[i + 1] as number) + (offsets[1] as number)))
+                buf.data[i + 2] = Math.max(0, Math.min(1, (buf.data[i + 2] as number) + (offsets[2] as number)))
+              }
+            }
+          }
+        }
+        patchAsset = join(dir, `${genId}-patch.png`)
+        await saveImage(hiPatch, patchAsset, 'png', 92, 16)
+        normCropBox = [
+          round(cropBox.left / img.width, 6),
+          round(cropBox.top / img.height, 6),
+          round(cropBox.width / img.width, 6),
+          round(cropBox.height / img.height, 6),
+        ]
         const stitched: typeof img = { width: img.width, height: img.height, data: new Float32Array(img.data) }
         for (let y = 0; y < cropBox.height; y++) {
           for (let x = 0; x < cropBox.width; x++) {
@@ -649,7 +761,23 @@ export class EditService {
       const head = this.head(taskId)
       const ops: EditOp[] = []
       if (!head.doc.stages.some(st => st.engine === 'ai')) ops.push({ op: 'add_stage', engine: 'ai' })
-      ops.push({ op: 'add_step', stage: 'ai', step: { op: 'gen_layer', params: { asset, kind: opts.kind, prompt: opts.prompt, provider: opts.provider.id, authorization: opts.authorizationId }, ...(opts.mask !== undefined ? { mask: opts.mask } : {}), label: `${opts.kind}: ${opts.prompt.slice(0, 40)}` } })
+      ops.push({
+        op: 'add_step',
+        stage: 'ai',
+        step: {
+          op: 'gen_layer',
+          params: {
+            asset,
+            ...(patchAsset && normCropBox ? { patch_asset: patchAsset, crop_box: normCropBox } : {}),
+            kind: opts.kind,
+            prompt: opts.prompt,
+            provider: opts.provider.id,
+            authorization: opts.authorizationId,
+          },
+          ...(opts.mask !== undefined ? { mask: opts.mask } : {}),
+          label: `${opts.kind}: ${opts.prompt.slice(0, 40)}`,
+        },
+      })
       ops.push({ op: 'set_provenance', generative: true, authorization: opts.authorizationId, note: `${opts.kind} via ${opts.provider.id} (${opts.provider.type}): ${opts.prompt.slice(0, 120)}` })
       const { revision, warnings } = await this.applyOps(taskId, ops, { author: opts.author, message: opts.message ?? `generative ${opts.kind} via ${opts.provider.id}`, signal: opts.signal })
       this.project.repo.addEvent(taskId, 'info', 'generative', `generated ${opts.kind} layer with ${opts.provider.id}`, { asset, authorization: opts.authorizationId, prompt: opts.prompt, provider: out.detail })

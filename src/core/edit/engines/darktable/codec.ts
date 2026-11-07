@@ -41,6 +41,8 @@ export interface DtModule {
   paramsType?: string
   paramsSize?: number
   params?: DtField
+  /** Optional hex-encoded default_params struct from darktable module init. */
+  defaultBlob?: string
   error?: string
   docUrl?: string
 }
@@ -289,9 +291,79 @@ export function expandCurveSugar(operation: string, params: Record<string, unkno
   return out
 }
 
+/**
+ * Non-zero runtime defaults set in darktable's module `init()` functions that
+ * are not captured by static C `$DEFAULT` header annotations (e.g. identity
+ * matrices, crop right/bottom bounds, wavelet frequency grids, level endpoints).
+ */
+export const DT_MODULE_FIELD_DEFAULTS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+  crop: {
+    cx: 0,
+    cy: 0,
+    cw: 1,
+    ch: 1,
+  },
+  channelmixerrgb: {
+    red: [1, 0, 0, 0],
+    green: [0, 1, 0, 0],
+    blue: [0, 0, 1, 0],
+    saturation: [0, 0, 0, 0],
+    lightness: [0, 0, 0, 0],
+    grey: [0, 0.5, 0, 0],
+  },
+  channelmixer: {
+    red: [1, 0, 0, 0, 0, 0, 0],
+    green: [0, 1, 0, 0, 0, 0, 0],
+    blue: [0, 0, 1, 0, 0, 0, 0],
+  },
+  levels: {
+    levels: [0, 50, 100],
+  },
+  rgblevels: {
+    levels: [[0, 0.5, 1], [0, 0.5, 1], [0, 0.5, 1]],
+  },
+  denoiseprofile: {
+    a: [1, 1, 1],
+    b: [0, 0, 0],
+    x: Array.from({ length: 6 }, () => [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1]),
+    y: Array.from({ length: 6 }, () => [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+  },
+  atrous: {
+    x: Array.from({ length: 5 }, () => [0, 0.2, 0.4, 0.6, 0.8, 1]),
+    y: Array.from({ length: 5 }, () => [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+  },
+}
+
+/** Normalize high-level aliases on darktable module parameters before schema validation. */
+export function normalizeDarktableParams(operation: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (operation === 'crop') {
+    const out: Record<string, unknown> = { ...params }
+    if (out.left !== undefined && out.cx === undefined) out.cx = out.left
+    if (out.top !== undefined && out.cy === undefined) out.cy = out.top
+    if (out.right !== undefined && out.cw === undefined) out.cw = out.right
+    if (out.bottom !== undefined && out.ch === undefined) out.ch = out.bottom
+    delete out.left; delete out.top; delete out.right; delete out.bottom
+    if (out.x !== undefined && out.cx === undefined) out.cx = out.x
+    if (out.y !== undefined && out.cy === undefined) out.cy = out.y
+    if (typeof out.w === 'number' && out.cw === undefined) out.cw = Math.min(1, Number(out.cx ?? 0) + out.w)
+    if (typeof out.h === 'number' && out.ch === undefined) out.ch = Math.min(1, Number(out.cy ?? 0) + out.h)
+    delete out.x; delete out.y; delete out.w; delete out.h
+    return out
+  }
+  return params
+}
+
 export function paramsSchema(m: DtModule): ParamSchema {
   if (m.params === undefined) return { type: 'object', properties: { blob: { type: 'string', description: 'raw params blob (hex); this module publishes no introspection' } }, additionalProperties: false }
   const s = fieldSchema(m.params)
+  const overrides = DT_MODULE_FIELD_DEFAULTS[m.operation]
+  if (overrides !== undefined && s.properties !== undefined) {
+    for (const [k, defVal] of Object.entries(overrides)) {
+      if (s.properties[k] !== undefined) {
+        s.properties[k] = { ...s.properties[k], default: structuredClone(defVal) }
+      }
+    }
+  }
   const sugar = curveSugarSchema(m.operation)
   if (sugar !== undefined && s.properties !== undefined) {
     s.properties = { curves: sugar, ...s.properties }
@@ -371,8 +443,12 @@ export function encodeParams(m: DtModule, params: Record<string, unknown>): Buff
     if (!/^[0-9a-f]*$/i.test(hex) || hex.length === 0) throw new ChengyingError('invalid-argument', `${m.operation} has no introspection; pass params.blob as hex`)
     return Buffer.from(hex, 'hex')
   }
-  const expanded = expandCurveSugar(m.operation, params)
+  const normalized = normalizeDarktableParams(m.operation, params)
+  const expanded = expandCurveSugar(m.operation, normalized)
   const buf = Buffer.alloc(m.paramsSize)
+  if (typeof m.defaultBlob === 'string' && m.defaultBlob.length === m.paramsSize * 2) {
+    Buffer.from(m.defaultBlob, 'hex').copy(buf)
+  }
   encodeField(buf, m.params, expanded, 0, m.operation)
   return buf
 }

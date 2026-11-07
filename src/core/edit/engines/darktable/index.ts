@@ -16,7 +16,7 @@ import { CatalogCache, coverageOf, fingerprintOf, validateWithCatalog } from '..
 import { normalizeParams, type ParamSchema } from '../../schema.ts'
 import { locateDarktable, type DarktableInstall } from './locate.ts'
 import { DarktableMcp, introspectNative, nativeIntrospectionHint, snapshotFor, type DtIntrospection } from './introspect.ts'
-import { decodeParams, encodeParams, expandCurveSugar, paramsSchema, type DtModule } from './codec.ts'
+import { decodeParams, encodeParams, expandCurveSugar, normalizeDarktableParams, paramsSchema, type DtModule } from './codec.ts'
 import { applyMask, BLEND_SCHEMA, blendColorspaceFor, decodeBlend, defaultBlend, encodeBlend, SUPPORTED_BLEND_VERSION, type DtForm } from './blend.ts'
 import { buildXmp, parseDtStyle, parseXmpHistory, type DtHistoryItem, type ImportedItem } from './xmp.ts'
 import { run } from '../../../util/proc.ts'
@@ -24,7 +24,7 @@ import { cliPath } from '../../../util/path.ts'
 import { ChengyingError, errorMessage } from '../../../util/errors.ts'
 import { newId, nowIso } from '../../../util/misc.ts'
 
-const CATALOG_VERSION = 6
+const CATALOG_VERSION = 7
 /** Modules the export pipeline inserts itself and drops from any supplied history (output size comes from the render request). */
 const PIPELINE_INTERNAL = new Set(['finalscale'])
 const FLAGS = { blending: 1 << 1, deprecated: 1 << 2, hidden: 1 << 5, oneInstance: 1 << 7, noHistory: 1 << 9, noMasks: 1 << 10 }
@@ -252,7 +252,8 @@ export class DarktableEngine implements EngineAdapter {
       if (!catalog.operations.some(o => o.id === step.op)) throw new ChengyingError('invalid-argument', `unknown darktable module "${step.op}"`)
       return { step, warnings: [] }
     }
-    const v = validateWithCatalog(step, catalog, { fill: true })
+    const normalizedStep: EditStep = { ...step, params: normalizeDarktableParams(step.op, step.params ?? {}) }
+    const v = validateWithCatalog(normalizedStep, catalog, { fill: true })
     const op = catalog.operations.find(o => o.id === v.step.op) as OperationSpec
     if (op.tags?.includes('pipeline-internal')) throw new ChengyingError('unsupported', `${op.id} is inserted by darktable's export pipeline and cannot be set through history; control output size with the render/export maxEdge`)
     if ((step.instance ?? 0) > 0 && !op.multiInstance) throw new ChengyingError('invalid-argument', `${op.id} allows only one instance`)

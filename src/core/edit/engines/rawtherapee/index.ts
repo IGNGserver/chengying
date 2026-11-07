@@ -86,6 +86,24 @@ function curveValue(v: unknown): string {
   return toPp3Value(v)
 }
 
+function normalizeRtStep(step: EditStep): EditStep {
+  const params: Record<string, unknown> = { ...(step.params ?? {}) }
+  const opLower = step.op.toLowerCase()
+  if (opLower === 'rotation') {
+    if (params.Degrees !== undefined && params.Degree === undefined) params.Degree = params.Degrees
+    delete params.Degrees
+  } else if (opLower === 'white balance') {
+    if (typeof params.Setting === 'string' && params.Setting.toLowerCase() === 'auto') {
+      params.Setting = 'autitcgreen'
+    } else if ((params.Temperature !== undefined || params.Green !== undefined) && params.Setting === undefined) {
+      params.Setting = 'Custom'
+    }
+  } else if (opLower === 'crop') {
+    if (params.Enabled === undefined) params.Enabled = true
+  }
+  return { ...step, params }
+}
+
 export class RawTherapeeEngine implements EngineAdapter {
   readonly id = 'rawtherapee'
   readonly title = 'RawTherapee'
@@ -221,7 +239,7 @@ export class RawTherapeeEngine implements EngineAdapter {
   }
 
   validateStep(step: EditStep, catalog: Catalog): ValidatedStep {
-    const v = validateWithCatalog(step, catalog, { fill: false })
+    const v = validateWithCatalog(normalizeRtStep(step), catalog, { fill: false })
     if (step.mask !== undefined && step.op !== 'Locallab') throw new ChengyingError('unsupported', 'RawTherapee applies local edits through Locallab spots; use operation "Locallab" instead of a mask')
     if ((step.instance ?? 0) > 0) throw new ChengyingError('unsupported', 'RawTherapee tools have a single instance; use several Locallab spots for repeated local edits')
     return v
@@ -233,7 +251,7 @@ export class RawTherapeeEngine implements EngineAdapter {
   }
 
   /** Merge steps (in order) into one partial profile. */
-  buildProfile(stage: EditStage, catalog: Catalog): Pp3 {
+  buildProfile(stage: EditStage, catalog: Catalog, dims?: { width: number; height: number }): Pp3 {
     const p: Pp3 = new Map()
     for (const s of stage.steps) {
       if (!s.enabled) continue
@@ -251,6 +269,25 @@ export class RawTherapeeEngine implements EngineAdapter {
           continue
         }
         section.set(k, Array.isArray(v) || isRecord(v) ? curveValue(v) : toPp3Value(v))
+      }
+      if (step.op === 'Crop' && dims !== undefined && dims.width > 1 && dims.height > 1) {
+        const xv = Number(step.params.X)
+        const yv = Number(step.params.Y)
+        const wv = Number(step.params.W)
+        const hv = Number(step.params.H)
+        const isNormalized = (Number.isFinite(wv) && wv > 0 && wv <= 1) || (Number.isFinite(hv) && hv > 0 && hv <= 1) || (Number.isFinite(xv) && xv > 0 && xv < 1) || (Number.isFinite(yv) && yv > 0 && yv < 1)
+        if (isNormalized) {
+          const nx = Number.isFinite(xv) && xv <= 1 ? xv : 0
+          const ny = Number.isFinite(yv) && yv <= 1 ? yv : 0
+          const nw = Number.isFinite(wv) && wv <= 1 ? wv : Math.max(0.05, 1 - nx)
+          const nh = Number.isFinite(hv) && hv <= 1 ? hv : Math.max(0.05, 1 - ny)
+          section.set('X', String(Math.max(0, Math.round(nx * dims.width))))
+          section.set('Y', String(Math.max(0, Math.round(ny * dims.height))))
+          section.set('W', String(Math.max(1, Math.min(dims.width, Math.round(nw * dims.width)))))
+          section.set('H', String(Math.max(1, Math.min(dims.height, Math.round(nh * dims.height)))))
+          if (!section.has('FixedRatio') && step.params.Ratio === undefined) section.set('FixedRatio', 'false')
+          if (!section.has('Enabled')) section.set('Enabled', 'true')
+        }
       }
       p.set(step.op, section)
     }
@@ -274,7 +311,12 @@ export class RawTherapeeEngine implements EngineAdapter {
     const p = await this.probe()
     if (!p.available || this.cli === undefined) throw new ChengyingError('engine-unavailable', p.reason ?? 'RawTherapee unavailable')
     const opts = this.validateStageOptions(req.stage.options, catalog).options
-    const profile = this.buildProfile(req.stage, catalog)
+    const inputMeta = await sharp(req.input, { failOn: 'none' }).metadata().catch(() => undefined)
+    const orient = req.orientation ?? inputMeta?.orientation ?? 1
+    const dims = inputMeta?.width && inputMeta?.height
+      ? (orient >= 5 ? { width: inputMeta.height, height: inputMeta.width } : { width: inputMeta.width, height: inputMeta.height })
+      : (req.fullEdge !== undefined && req.fullEdge > 1 ? { width: req.fullEdge, height: req.fullEdge } : undefined)
+    const profile = this.buildProfile(req.stage, catalog, dims)
     if (req.maxEdge !== undefined && req.maxEdge > 0) {
       profile.set('Resize', new Map([['Enabled', 'true'], ['AppliesTo', 'Cropped area'], ['Method', 'Lanczos'], ['DataSpecified', '3'], ['Width', String(req.maxEdge)], ['Height', String(req.maxEdge)], ['AllowUpscaling', 'false']]))
     }

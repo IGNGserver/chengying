@@ -6,10 +6,15 @@ import sharp from 'sharp'
 import { computeFeatures } from '../src/core/analysis/pixels.ts'
 import { potentialScore, technicalScore } from '../src/core/analysis/scoring.ts'
 import { createModelScorer } from '../src/core/analysis/models.ts'
-import { decodeParams, encodeParams, expandCurveSugar, paramsSchema, type DtModule } from '../src/core/edit/engines/darktable/codec.ts'
+import { decodeParams, encodeParams, expandCurveSugar, normalizeDarktableParams, paramsSchema, type DtModule } from '../src/core/edit/engines/darktable/codec.ts'
+import { RawTherapeeEngine } from '../src/core/edit/engines/rawtherapee/index.ts'
+import { BuiltinEngine } from '../src/core/edit/engines/builtin/index.ts'
+import { BUILTIN_OPS } from '../src/core/edit/engines/builtin/ops.ts'
+import { saveImage, type FImage } from '../src/core/edit/engines/builtin/image.ts'
 import { Project } from '../src/core/project.ts'
+import type { Catalog } from '../src/core/edit/engine.ts'
 import { EngineRegistry } from '../src/core/edit/registry.ts'
-import { EditService } from '../src/core/edit/service.ts'
+import { EditService, imageStats } from '../src/core/edit/service.ts'
 import { exportPhotos } from '../src/core/export/exporter.ts'
 import { ChengyingRuntime } from '../src/dsh/runtime.ts'
 import { resolveConfig } from '../src/dsh/config.ts'
@@ -324,4 +329,153 @@ describe('batches 2, 3 & 4 · sub-agent budgets, darktable curves, privacy & dua
     const unified = await unifyTool.execute({ selection: selRes.selectionId }, execFor(stubCtx(), 'edit_unify_style')) as { reference: { mode?: string } }
     expect(unified.reference.mode).toBe('scene-anchor')
   }, 120_000)
+
+  it('validates Phase A–D retouching quality fixes: cheat-sheet aliases, tone/heal math, 16-bit stats, darktable defaults & diagnostics', async () => {
+    // 1. Built-in per-channel curves, rotate auto_crop alias, sub-box aspect crop, and vignette fraction compatibility
+    const builtin = new BuiltinEngine()
+    const bCat = await builtin.catalog()
+    const curveStep = builtin.validateStep({
+      id: 'c1',
+      op: 'curve',
+      enabled: true,
+      params: { points: [[0, 0], [0.5, 0.55], [1, 1]], red: [[0, 0], [0.5, 0.6], [1, 1]], blue: [[0, 0], [0.5, 0.4], [1, 1]] },
+    }, bCat)
+    expect(curveStep.warnings).toHaveLength(0)
+
+    const rotStep = builtin.validateStep({ id: 'r1', op: 'rotate', enabled: true, params: { angle: 2.5, auto_crop: true } }, bCat)
+    expect(rotStep.step.params.auto_crop).toBe(true)
+
+    const cropOp = BUILTIN_OPS.find(o => o.id === 'crop')!
+    const testImg: FImage = { width: 200, height: 100, data: new Float32Array(200 * 100 * 3).fill(0.5) }
+    const subCrop = cropOp.apply(testImg, { x: 0.1, y: 0.1, w: 0.5, h: 0.5, aspect: '1:1', cx: 0.5, cy: 0.5 }, { readable: x => x, seed: 1 })
+    expect(subCrop.width).toBe(50)
+    expect(subCrop.height).toBe(50)
+
+    // 2. Built-in tone: pure black stays 0 when lifting shadows, linear >1.0 highlight headroom is recovered when highlights < 0
+    const toneOp = BUILTIN_OPS.find(o => o.id === 'tone')!
+    const hdrImg: FImage = {
+      width: 3,
+      height: 1,
+      data: new Float32Array([
+        0, 0, 0, // pure black pixel
+        0.04, 0.04, 0.04, // deep shadow pixel
+        1.35, 1.35, 1.35, // over-unity linear highlight from prior exposure step
+      ]),
+    }
+    const toned = toneOp.apply(hdrImg, { contrast: 0, shadows: 60, highlights: -70, whites: 0, blacks: 0, brightness: 0 }, { readable: x => x, seed: 1 })
+    expect(toned.data[0]).toBe(0) // pure black never turns into milky fog
+    expect(toned.data[3]!).toBeGreaterThan(0.055) // deep shadow lifted
+    expect(toned.data[6]!).toBeLessThan(0.98) // linear highlight >1.0 recovered below clipping
+
+    // 3. Built-in heal on a steep gradient: 2D plane matching eliminates crescent boundary seams
+    const healOp = BUILTIN_OPS.find(o => o.id === 'heal')!
+    const gw = 120; const gh = 120
+    const gradData = new Float32Array(gw * gh * 3)
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const v = 0.15 + 0.6 * (x / gw) + 0.2 * (y / gh)
+        const idx = (y * gw + x) * 3
+        gradData[idx] = v; gradData[idx + 1] = v; gradData[idx + 2] = v
+      }
+    }
+    const cleanGrad: FImage = { width: gw, height: gh, data: new Float32Array(gradData) }
+    // Paint a dark dust spot at (0.5, 0.5)
+    for (let y = 55; y <= 65; y++) {
+      for (let x = 55; x <= 65; x++) {
+        if (Math.hypot(x - 60, y - 60) <= 4.5) {
+          const idx = (y * gw + x) * 3
+          gradData[idx] = 0.02; gradData[idx + 1] = 0.02; gradData[idx + 2] = 0.02
+        }
+      }
+    }
+    const healed = healOp.apply({ width: gw, height: gh, data: gradData }, { spots: [{ x: 0.5, y: 0.5, r: 0.05 }] }, { readable: x => x, seed: 1 })
+    let spotErr = 0; let spotN = 0
+    for (let y = 54; y <= 66; y++) {
+      for (let x = 54; x <= 66; x++) {
+        const idx = (y * gw + x) * 3
+        spotErr += Math.abs((healed.data[idx] as number) - (cleanGrad.data[idx] as number))
+        spotN++
+      }
+    }
+    expect(spotErr / spotN).toBeLessThan(0.01)
+
+    // 4. 16-bit TIFF/PNG imageStats accuracy
+    const statDir = await freshDir('stat16')
+    const p8 = join(statDir, 'img8.png')
+    const p16 = join(statDir, 'img16.tif')
+    await saveImage(cleanGrad, p8, 'png', 92, 8)
+    await saveImage(cleanGrad, p16, 'tiff', 92, 16)
+    const st8 = await imageStats(p8, { faceBox: [0.2, 0.2, 0.3, 0.3] })
+    const st16 = await imageStats(p16, { faceBox: [0.2, 0.2, 0.3, 0.3] })
+    expect(Math.abs(st16.mean.luma - st8.mean.luma)).toBeLessThan(1.5)
+    expect(st16.zones?.midtones).toBeGreaterThan(100)
+    expect(st16.faceLuma).toBeDefined()
+
+    // 5. darktable crop aliases (left/top/right/bottom -> cx/cy/cw/ch, cw/ch default=1) & channelmixerrgb identity defaults
+    const snap = JSON.parse(readFileSync(join(process.cwd(), 'catalogs/darktable-5.6.1.json'), 'utf8')) as { modules: DtModule[] }
+    const dtCrop = snap.modules.find(m => m.operation === 'crop')!
+    const dtCropSchema = paramsSchema(dtCrop)
+    expect(dtCropSchema.properties?.cw?.default).toBe(1)
+    expect(dtCropSchema.properties?.ch?.default).toBe(1)
+    const normCrop = normalizeDarktableParams('crop', { left: 0.08, top: 0.12, right: 0.92, bottom: 0.88 })
+    expect(normCrop).toEqual({ cx: 0.08, cy: 0.12, cw: 0.92, ch: 0.88 })
+
+    const dtCm = snap.modules.find(m => m.operation === 'channelmixerrgb')!
+    const dtCmSchema = paramsSchema(dtCm)
+    expect(dtCmSchema.properties?.red?.default).toEqual([1, 0, 0, 0])
+    expect(dtCmSchema.properties?.green?.default).toEqual([0, 1, 0, 0])
+    expect(dtCmSchema.properties?.blue?.default).toEqual([0, 0, 1, 0])
+
+    // 6. RawTherapee normalized Crop (0..1 -> px), Rotation.Degrees alias & White Balance Auto/Custom
+    const rtEng = new RawTherapeeEngine({ workDir: join(state, 'rt-unit') })
+    const fakeRtCatalog: Catalog = {
+      engine: 'rawtherapee',
+      engineVersion: '5.13',
+      catalogVersion: 2,
+      fingerprint: 'test',
+      source: 'profile-dump',
+      discoveredAt: '',
+      stageOptions: { type: 'object', properties: {} },
+      coverage: { operations: 3, parameters: 10, withSchema: 3, extensions: [], unsupported: [] },
+      operations: [
+        {
+          id: 'Crop', title: 'Crop', category: 'geometry', masks: [], multiInstance: false,
+          params: { type: 'object', additionalProperties: false, properties: { Enabled: { type: 'boolean', default: false }, FixedRatio: { type: 'boolean', default: true }, X: { type: 'number', default: 0 }, Y: { type: 'number', default: 0 }, W: { type: 'number', default: 4000 }, H: { type: 'number', default: 3000 } } },
+        },
+        {
+          id: 'Rotation', title: 'Rotation', category: 'geometry', masks: [], multiInstance: false,
+          params: { type: 'object', additionalProperties: false, properties: { Degree: { type: 'number', minimum: -45, maximum: 45, default: 0 } } },
+        },
+        {
+          id: 'White Balance', title: 'White Balance', category: 'tool', masks: [], multiInstance: false,
+          params: { type: 'object', additionalProperties: false, properties: { Setting: { type: 'string', enum: ['Camera', 'autitcgreen', 'Custom'], default: 'Camera' }, Temperature: { type: 'number', default: 5200 }, Green: { type: 'number', default: 1 } } },
+        },
+      ],
+    }
+    const pp = rtEng.buildProfile({
+      id: 'st_rt',
+      engine: 'rawtherapee',
+      steps: [
+        { id: 's1', op: 'Crop', enabled: true, params: { X: 0.1, Y: 0.2, W: 0.8, H: 0.6 } },
+        { id: 's2', op: 'Rotation', enabled: true, params: { Degrees: -1.8 } },
+        { id: 's3', op: 'White Balance', enabled: true, params: { Temperature: 5800 } },
+      ],
+    }, fakeRtCatalog, { width: 4000, height: 3000 })
+    expect(pp.get('Crop')?.get('X')).toBe('400')
+    expect(pp.get('Crop')?.get('Y')).toBe('600')
+    expect(pp.get('Crop')?.get('W')).toBe('3200')
+    expect(pp.get('Crop')?.get('H')).toBe('1800')
+    expect(pp.get('Crop')?.get('FixedRatio')).toBe('false')
+    expect(pp.get('Rotation')?.get('Degree')).toBe('-1.8')
+    expect(pp.get('White Balance')?.get('Setting')).toBe('Custom')
+
+    // 7. edit_task_info diagnostics & edit_apply compare=true
+    const anyTask = project.repo.tasks()[0]!
+    const bound = taskTools(rt, { projectId: project.id, taskId: anyTask.id })
+    const infoRes = await bound.find(t => t.name === 'edit_task_info')!.execute({ view: false }, execFor(stubCtx(), 'edit_task_info')) as {
+      photo?: { diagnostics?: { exposure?: unknown; geometry?: unknown } }
+    }
+    expect(infoRes.photo?.diagnostics?.exposure).toBeDefined()
+    expect(infoRes.photo?.diagnostics?.geometry).toBeDefined()
+  })
 })

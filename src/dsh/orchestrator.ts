@@ -17,13 +17,63 @@ import { taskTools } from './tools/edit.ts'
 import type { Project } from '../core/project.ts'
 import type { TaskRecord } from '../core/types.ts'
 import { ChengyingError, errorMessage } from '../core/util/errors.ts'
-import { Semaphore } from '../core/util/misc.ts'
+import { round, Semaphore } from '../core/util/misc.ts'
 import { emptyUsage } from '../core/store/repo.ts'
 
 /** Global tools an editing child may still see (everything else is hidden). */
 export const CHILD_GLOBAL_TOOLS = ['edit_engines', 'edit_capabilities', 'edit_describe', 'edit_native']
 
 interface Child { projectId: string; taskId: string }
+
+/** Extract actionable pixel-level measurements from culling features so sub-agents do not guess angles, casts or mask coordinates. */
+export function photoDiagnostics(project: Project, shotId: string): Record<string, unknown> | undefined {
+  const f = project.repo.features(shotId)
+  if (f === undefined) return undefined
+  const castMag = Math.hypot(f.color.castA, f.color.castB)
+  const wbHint = castMag >= 6
+    ? `neutral cast detected (Lab a*=${round(f.color.castA, 1)}, b*=${round(f.color.castB, 1)}): consider white_balance temperature ${f.color.castB > 0 ? 'cooler (−)' : 'warmer (+)'}${Math.abs(f.color.castA) >= 4 ? `, tint ${f.color.castA > 0 ? 'greener (−)' : 'magenta (+)'}` : ''}`
+    : undefined
+  const tiltHint = f.composition.tiltConfidence >= 0.35 && Math.abs(f.composition.tiltDeg) >= 0.8
+    ? `measured horizon/vertical tilt ${round(f.composition.tiltDeg, 2)}° (confidence ${round(f.composition.tiltConfidence, 2)}): use rotate angle=${round(f.composition.tiltDeg, 2)} (or ashift/Rotation)`
+    : undefined
+  const fb = f.subject?.faceBox
+  const suggestedFaceMask = fb !== undefined
+    ? {
+        type: 'ellipse',
+        cx: round(fb[0] + fb[2] / 2, 3),
+        cy: round(fb[1] + fb[3] / 2, 3),
+        rx: round(Math.max(0.05, fb[2] * 0.65), 3),
+        ry: round(Math.max(0.05, fb[3] * 0.65), 3),
+        feather: 0.06,
+      }
+    : undefined
+  return {
+    exposure: {
+      medianLuma255: round(f.exposure.median * 255, 1),
+      p01Luma255: round(f.exposure.p01 * 255, 1),
+      p99Luma255: round(f.exposure.p99 * 255, 1),
+      clipHighPct: round(f.exposure.clipHigh * 100, 2),
+      clipLowPct: round(f.exposure.clipLow * 100, 2),
+      shadowHeadroomPct: round((f.exposure.shadowHeadroom ?? 1) * 100, 1),
+    },
+    whiteBalance: {
+      castA: round(f.color.castA, 2),
+      castB: round(f.color.castB, 2),
+      warmth: round(f.color.warmth, 2),
+      ...(wbHint ? { hint: wbHint } : {}),
+    },
+    geometry: {
+      tiltDeg: round(f.composition.tiltDeg, 2),
+      tiltConfidence: round(f.composition.tiltConfidence, 2),
+      ...(tiltHint ? { hint: tiltHint } : {}),
+    },
+    subject: {
+      saliencyCentroid: [round(f.composition.saliencyCentroid[0], 3), round(f.composition.saliencyCentroid[1], 3)],
+      faceRegions: f.subject?.faceRegions ?? 0,
+      ...(fb ? { faceBox: fb, suggestedFaceMask } : {}),
+    },
+  }
+}
 
 export function engineCheatSheet(engines: readonly string[]): string {
   const unique = [...new Set(engines)]
@@ -33,14 +83,16 @@ export function engineCheatSheet(engines: readonly string[]): string {
       `Core "builtin" operations (exact schemas — use directly in edit_apply without calling edit_describe):
   - exposure: { ev: -6..6 (default 0, typical step ±0.15..1.0) } (maskable)
   - white_balance: { temperature: -100..100 (0, +warmer), tint: -100..100 (0, +magenta) } (maskable)
-  - tone: { contrast: -100..100 (0), highlights: -100..100 (0), shadows: -100..100 (0), whites: -100..100 (0), blacks: -100..100 (0) } (maskable)
-  - curve: { points?: [[x,y],...], red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...] } (x,y in 0..1) (maskable)
+  - tone: { contrast: -100..100 (0), highlights: -100..100 (0), shadows: -100..100 (0), whites: -100..100 (0), blacks: -100..100 (0), brightness?: -100..100 (0) } (maskable)
+  - curve: { points?: [[x,y],...], channel?: "luma"|"rgb"|"red"|"green"|"blue", red?: [[x,y],...], green?: [[x,y],...], blue?: [[x,y],...] } (x,y in 0..1) (maskable)
   - saturation: { saturation: -100..100 (0), vibrance: -100..100 (0) } (maskable)
-  - hsl: { red|orange|yellow|green|aqua|blue|purple|magenta: { hue?: -180..180, saturation?: -100..100, luminance?: -100..100 } } (maskable)
-  - clarity: { amount: -100..100 (0), radius?: 1..100 (24) } · dehaze: { amount: -100..100 (0) } (maskable)
-  - denoise: { luminance?: 0..100 (25), chroma?: 0..100 (35) } · sharpen: { amount?: 0..300 (80), radius?: 0.3..5 (1), threshold?: 0..20 (2) } (maskable)
-  - vignette: { amount: -100..100 (-25), midpoint?: 0.1..0.9 (0.5), feather?: 0.05..1 (0.45) } (maskable)
-  - rotate: { angle: -45..45 (deg, +clockwise), auto_crop?: true } · crop: { x?: 0..0.95, y?: 0..0.95, w?: 0.05..1, h?: 0.05..1, aspect?: "free"|"original"|"1:1"|"3:2"|"2:3"|"4:3"|"3:4"|"16:9"|"9:16" } · perspective: { vertical?: -100..100, horizontal?: -100..100 } (geometry ops: applied in step order, no mask)`,
+  - hsl: { red|orange|yellow|green|aqua|blue|purple|magenta: { hue?: -100..100, saturation?: -100..100, luminance?: -100..100 } } (maskable)
+  - color_grading: { shadows?: { hue: 0..360, saturation: 0..100 }, midtones?: { hue: 0..360, saturation: 0..100 }, highlights?: { hue: 0..360, saturation: 0..100 }, balance?: -100..100 } (maskable)
+  - clarity: { amount: -100..100 (0), radius?: 2..200 (30) } · dehaze: { amount: -100..100 (0) } (maskable)
+  - denoise: { luminance?: 0..100 (0), chroma?: 0..100 (25), detail?: 0..100 (50) } · sharpen: { amount?: 0..300 (60), radius?: 0.3..5 (1), threshold?: 0..50 (2), masking?: 0..100 (0) } (maskable)
+  - vignette: { amount: -100..100 (0, e.g. -25), midpoint?: 0..100 (50), roundness?: -100..100 (0), feather?: 0..100 (50) } (maskable)
+  - heal: { spots: [{ x: 0..1, y: 0..1, r: 0.001..0.2 (0.01), src_x?: 0..1, src_y?: 0..1 }] } (spot blemish/dust removal, no mask)
+  - rotate: { angle: -45..45 (deg, +clockwise), crop?: true } · crop: { x?: 0..0.95, y?: 0..0.95, w?: 0.01..1, h?: 0.01..1, aspect?: "free"|"original"|"1:1"|"3:2"|"2:3"|"4:3"|"3:4"|"4:5"|"16:9"|"9:16", cx?: 0..1, cy?: 0..1 } · perspective: { vertical?: -100..100, horizontal?: -100..100, scale?: 50..150, crop?: true } (geometry ops: applied in step order, no mask)`,
     )
   }
   if (unique.includes('darktable')) {
@@ -48,10 +100,13 @@ export function engineCheatSheet(engines: readonly string[]): string {
       `Core "darktable" operations (scene-referred workflow — prefer these modern modules; avoid stacking legacy basecurve/levels/shadhi on top):
   - exposure: { exposure: -4..4 (EV, default 0), black?: -0.1..0.1 (0) } (maskable)
   - colorbalancergb: { chroma_global?: -1..1 (0), vibrance?: -1..1 (0), contrast?: -1..1 (0), saturation_global?: -1..1 (0), brilliance_shadows?: -1..1 (0), brilliance_midtones?: -1..1 (0), brilliance_highlights?: -1..1 (0) } (maskable)
+  - channelmixerrgb: { temperature?: 1667..25000 (5003, K), illuminant?: "DT_ILLUMINANT_D"|"DT_ILLUMINANT_BB"|"DT_ILLUMINANT_CAMERA", gamut?: 0..12 (1) } (scene-referred color calibration / white balance, maskable)
+  - toneequal: { blacks?: -2..2 (0), shadows?: -2..2 (0), midtones?: -2..2 (0), highlights?: -2..2 (0), whites?: -2..2 (0) } (zone exposure recovery, maskable)
   - tonecurve: { curves: { L?: [[0,0],[0.25,0.22],[0.75,0.78],[1,1]], a?: [...], b?: [...] } } (high-level spline points in 0..1, maskable)
   - rgbcurve: { curves: { master?: [[0,0],...,[1,1]], r?: [...], g?: [...], b?: [...] } } (maskable)
   - sigmoid: { middle_grey_contrast?: 0.1..10 (1.5), contrast_skewness?: -1..1 (0) }
-  - crop: { left: 0..1 (0), top: 0..1 (0), right: 0..1 (1), bottom: 0..1 (1) } (no mask)
+  - denoiseprofile: { strength?: 0.001..10 (1), shadows?: 0..1.8 (1) } · diffuse: { iterations?: 1..16 (1), sharpness?: -1..1 (0), radius?: 0..2048 (8) } (maskable)
+  - crop: { cx: 0..1 (0, left), cy: 0..1 (0, top), cw: 0..1 (1, right), ch: 0..1 (1, bottom) } (also accepts aliases left/top/right/bottom, no mask)
   - ashift: { rotation: -45..45 (deg), lensshift_v?: -1..1 (0), lensshift_h?: -1..1 (0) }`,
     )
   }
@@ -59,9 +114,9 @@ export function engineCheatSheet(engines: readonly string[]): string {
     blocks.push(
       `Core "rawtherapee" operations (pp3 sections — partial params merge over the base profile; local edits MUST use "Locallab" spots[], never step.mask):
   - Exposure: { Auto?: false, Compensation?: -5..5 (EV), Brightness?: -100..100, Contrast?: -100..100, Saturation?: -100..100, HighlightCompr?: 0..100, ShadowCompr?: 0..100 }
-  - White Balance: { Setting?: "Camera"|"Auto"|"Custom", Temperature?: 1500..60000, Green?: 0.02..10 }
+  - White Balance: { Setting?: "Camera"|"autitcgreen"|"Custom" (or "Auto"), Temperature?: 1500..60000, Green?: 0.02..10 }
   - Shadows & Highlights: { Enabled: true, Highlights?: 0..100, Shadows?: 0..100 }
-  - Crop: { Enabled: true, X: 0..1, Y: 0..1, W: 0..1, H: 0..1 } · Rotation: { Degrees: -45..45 }`,
+  - Crop: { Enabled: true, X: 0..1, Y: 0..1, W: 0..1, H: 0..1 } · Rotation: { Degree: -45..45 }`,
     )
   }
   if (unique.includes('ai')) {
@@ -158,10 +213,11 @@ export class EditOrchestrator {
     const engines = head.doc.stages.map((s, i) => `${i}:${s.engine}`).join(' → ')
     const cheatSheet = engineCheatSheet(head.doc.stages.map(s => s.engine))
     const tech = project.repo.scores(task.shotId).technical
+    const diag = photoDiagnostics(project, task.shotId)
     return `You are a professional photo retoucher. You work on exactly one photo (task ${task.id}) with tools bound to it.
 
 Photo: ${shot === undefined ? task.shotId : this.rt.shotContext(project, shot)}
-Measured issues: ${(tech?.issues ?? []).join(', ') || 'none'}${tech?.detail ? ` · technical detail ${JSON.stringify(tech.detail)}` : ''}
+Measured issues: ${(tech?.issues ?? []).join(', ') || 'none'}${tech?.detail ? ` · technical detail ${JSON.stringify(tech.detail)}` : ''}${diag ? `\nPixel diagnostics (use exact coordinates/angles when fixing tilt, cast or local face exposure): ${JSON.stringify(diag)}` : ''}
 Pipeline stages: ${engines}${resumed ? `\nThis task is being RESUMED: the current recipe already has edits (revision #${head.seq}). Review it with edit_task_info and continue; do not start over unless it is clearly wrong.` : ''}
 
 User brief: ${task.instructions}
