@@ -1,10 +1,11 @@
 /** Typed data access over the project database. */
 import type { Db } from './db.ts'
 import type {
-  EditDocument, Features, FileRecord, Group, GroupKind, RevisionRecord, ScoreSet, SelectionItem, SelectionSpec,
+  EditDocument, Features, FileRecord, GeneratedAssetReceipt, Group, GroupKind, RevisionRecord, ScoreSet, SelectionItem, SelectionSpec,
   Shot, TaskRecord, TaskStatus, UsageTotals,
 } from '../types.ts'
 import { newId, nowIso, parseJson } from '../util/misc.ts'
+import { ChengyingError } from '../util/errors.ts'
 
 type R = Record<string, unknown>
 
@@ -19,7 +20,7 @@ function fileFromRow(r: R): FileRecord {
   return {
     id: String(r.id), shotId: s(r.shot_id), path: String(r.path), relPath: String(r.rel_path), dir: String(r.dir),
     base: String(r.base), ext: String(r.ext), kind: r.kind === 'raw' ? 'raw' : 'raster', format: String(r.format),
-    size: Number(r.size), mtimeMs: Number(r.mtime_ms), sha256: s(r.sha256), status: r.status === 'error' ? 'error' : 'ok',
+    size: Number(r.size), mtimeMs: Number(r.mtime_ms), sha256: s(r.sha256), contentVersion: s(r.content_version) ?? s(r.sha256), status: r.status === 'error' ? 'error' : r.status === 'missing' ? 'missing' : 'ok',
     error: s(r.error), meta: parseJson(s(r.meta_json), {}),
   }
 }
@@ -29,7 +30,7 @@ function shotFromRow(r: R): Shot {
   const lon = n(r.gps_lon)
   const alt = n(r.gps_alt)
   return {
-    id: String(r.id), primaryFile: String(r.primary_file), rawFile: s(r.raw_file), rasterFile: s(r.raster_file),
+    id: String(r.id), status: r.status === 'missing' ? 'missing' : 'active', sourceVersion: s(r.source_version), primaryFile: String(r.primary_file), rawFile: s(r.raw_file), rasterFile: s(r.raster_file),
     captureTime: s(r.capture_time), captureTs: n(r.capture_ts), tzOffset: s(r.tz_offset), day: s(r.day),
     gps: lat !== null && lon !== null ? { lat, lon, ...(alt === null ? {} : { alt }) } : null,
     camera: s(r.camera), lens: s(r.lens), iso: n(r.iso), exposureTime: n(r.exposure_time), aperture: n(r.aperture),
@@ -86,14 +87,17 @@ export class Repo {
   saveFile(f: FileRecord): void {
     this.db.upsert('files', {
       id: f.id, shot_id: f.shotId, path: f.path, rel_path: f.relPath, dir: f.dir, base: f.base, ext: f.ext, kind: f.kind,
-      format: f.format, size: f.size, mtime_ms: f.mtimeMs, sha256: f.sha256, status: f.status, error: f.error,
+      format: f.format, size: f.size, mtime_ms: f.mtimeMs, sha256: f.sha256, content_version: f.contentVersion, status: f.status, error: f.error,
       meta_json: JSON.stringify(f.meta), scanned_at: nowIso(),
     })
   }
-  deleteFilesNotIn(paths: Set<string>): number {
+  markFilesMissingNotIn(paths: Set<string>): number {
     let removed = 0
-    for (const f of this.db.all<{ id: string; path: string }>('SELECT id, path FROM files')) {
-      if (!paths.has(f.path)) { this.db.run('DELETE FROM files WHERE id = ?', f.id); removed++ }
+    for (const f of this.db.all<{ id: string; path: string; status: string }>('SELECT id, path, status FROM files')) {
+      if (!paths.has(f.path) && f.status !== 'missing') {
+        this.db.run("UPDATE files SET status = 'missing', error = 'not found during scan', scanned_at = ? WHERE id = ?", nowIso(), f.id)
+        removed++
+      }
     }
     return removed
   }
@@ -104,14 +108,14 @@ export class Repo {
     return r === undefined ? undefined : shotFromRow(r)
   }
   shots(): Shot[] {
-    return this.db.all<R>('SELECT * FROM shots ORDER BY capture_ts IS NULL, capture_ts, id').map(shotFromRow)
+    return this.db.all<R>("SELECT * FROM shots WHERE status IS NULL OR status != 'missing' ORDER BY capture_ts IS NULL, capture_ts, id").map(shotFromRow)
   }
   shotCount(): number {
-    return Number(this.db.get<{ c: number }>('SELECT count(*) c FROM shots')?.c ?? 0)
+    return Number(this.db.get<{ c: number }>("SELECT count(*) c FROM shots WHERE status IS NULL OR status != 'missing'")?.c ?? 0)
   }
   summaryCounts(): { shots: number; raw: number; pairs: number; withPreview: number; analyzed: number; judged: number; selections: number; exports: number } {
     const shotRow = this.db.get<{ shots: number; raw: number; pairs: number; withPreview: number }>(
-      'SELECT count(*) shots, sum(CASE WHEN raw_file IS NOT NULL THEN 1 ELSE 0 END) raw, sum(CASE WHEN raw_file IS NOT NULL AND raster_file IS NOT NULL THEN 1 ELSE 0 END) pairs, sum(CASE WHEN preview_path IS NOT NULL THEN 1 ELSE 0 END) withPreview FROM shots',
+      "SELECT count(*) shots, sum(CASE WHEN raw_file IS NOT NULL THEN 1 ELSE 0 END) raw, sum(CASE WHEN raw_file IS NOT NULL AND raster_file IS NOT NULL THEN 1 ELSE 0 END) pairs, sum(CASE WHEN preview_path IS NOT NULL THEN 1 ELSE 0 END) withPreview FROM shots WHERE status IS NULL OR status != 'missing'",
     )
     const analyzed = Number(this.db.get<{ c: number }>("SELECT count(distinct shot_id) c FROM scores WHERE source = 'technical'")?.c ?? 0)
     const judged = Number(this.db.get<{ c: number }>("SELECT count(distinct shot_id) c FROM scores WHERE source LIKE 'vlm:%' OR source = 'agent'")?.c ?? 0)
@@ -131,7 +135,7 @@ export class Repo {
   saveShot(sh: Shot): void {
     const now = nowIso()
     this.db.upsert('shots', {
-      id: sh.id, primary_file: sh.primaryFile, raw_file: sh.rawFile, raster_file: sh.rasterFile, capture_time: sh.captureTime,
+      id: sh.id, status: sh.status, source_version: sh.sourceVersion, primary_file: sh.primaryFile, raw_file: sh.rawFile, raster_file: sh.rasterFile, capture_time: sh.captureTime,
       capture_ts: sh.captureTs, tz_offset: sh.tzOffset, day: sh.day, gps_lat: sh.gps?.lat ?? null, gps_lon: sh.gps?.lon ?? null,
       gps_alt: sh.gps?.alt ?? null, camera: sh.camera, lens: sh.lens, iso: sh.iso, exposure_time: sh.exposureTime,
       aperture: sh.aperture, focal_length: sh.focalLength, width: sh.width, height: sh.height, orientation: sh.orientation,
@@ -158,17 +162,22 @@ export class Repo {
     cols.push('updated_at = ?'); vals.push(nowIso())
     this.db.run(`UPDATE shots SET ${cols.join(', ')} WHERE id = ?`, ...vals, id)
   }
-  deleteShotsNotIn(ids: Set<string>): number {
+  markShotsMissingNotIn(ids: Set<string>): number {
     let removed = 0
-    for (const r of this.db.all<{ id: string }>('SELECT id FROM shots')) {
-      if (!ids.has(r.id)) {
-        this.db.run('DELETE FROM shots WHERE id = ?', r.id)
-        this.db.run('DELETE FROM features WHERE shot_id = ?', r.id)
-        this.db.run('DELETE FROM scores WHERE shot_id = ?', r.id)
+    for (const r of this.db.all<{ id: string; status: string | null }>('SELECT id, status FROM shots')) {
+      if (!ids.has(r.id) && r.status !== 'missing') {
+        this.db.run("UPDATE shots SET status = 'missing', updated_at = ? WHERE id = ?", nowIso(), r.id)
         removed++
       }
     }
     return removed
+  }
+
+  /** Source bytes changed: retain history/user judgments but invalidate computed derivatives. */
+  invalidateShotDerivatives(shotId: string): void {
+    this.db.run('DELETE FROM features WHERE shot_id = ?', shotId)
+    this.db.run('DELETE FROM scores WHERE shot_id = ?', shotId)
+    this.db.run('DELETE FROM group_members WHERE shot_id = ?', shotId)
   }
 
   /* features & scores */
@@ -275,11 +284,15 @@ export class Repo {
   createTask(t: Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'attempts' | 'usage' | 'startedAt' | 'finishedAt' | 'error' | 'headRevision' | 'agentSession'> & { id?: string }): TaskRecord {
     const id = t.id ?? newId('task')
     const now = nowIso()
-    this.db.upsert('tasks', {
-      id, kind: t.kind, shot_id: t.shotId, selection_id: t.selectionId, status: t.status, priority: t.priority, engine: t.engine,
-      instructions: t.instructions, options_json: JSON.stringify(t.options), attempts: 0, max_attempts: t.maxAttempts,
-      error: null, head_revision: null, agent_session: null, usage_json: JSON.stringify(emptyUsage()), created_at: now, updated_at: now,
-      started_at: null, finished_at: null, lease_until: null,
+    this.db.tx(() => {
+      const active = this.db.get<{ id: string }>("SELECT id FROM tasks WHERE shot_id = ? AND status IN ('queued','running','paused','waiting-authorization') LIMIT 1", t.shotId)
+      if (active !== undefined) throw new ChengyingError('conflict', `shot ${t.shotId} already has active task ${active.id}`, { taskId: active.id })
+      this.db.upsert('tasks', {
+        id, kind: t.kind, shot_id: t.shotId, selection_id: t.selectionId, status: t.status, priority: t.priority, engine: t.engine,
+        instructions: t.instructions, options_json: JSON.stringify(t.options), attempts: 0, max_attempts: t.maxAttempts,
+        error: null, head_revision: null, agent_session: null, usage_json: JSON.stringify(emptyUsage()), created_at: now, updated_at: now,
+        started_at: null, finished_at: null, lease_until: null,
+      })
     })
     return this.task(id) as TaskRecord
   }
@@ -295,6 +308,17 @@ export class Repo {
     if (filter.shotId !== undefined) { where.push('shot_id = ?'); params.push(filter.shotId) }
     const sql = `SELECT * FROM tasks${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY priority DESC, created_at`
     return this.db.all<R>(sql, ...params).map(taskFromRow)
+  }
+  /** Atomically claim one queued task. Only the worker that changes the row owns it. */
+  claimQueuedTask(id: string, agentSession: string): TaskRecord | undefined {
+    return this.db.tx(() => {
+      const now = nowIso()
+      const result = this.db.run(
+        "UPDATE tasks SET status = 'running', attempts = attempts + 1, agent_session = ?, started_at = COALESCE(started_at, ?), finished_at = NULL, error = NULL, updated_at = ? WHERE id = ? AND status = 'queued'",
+        agentSession, now, now, id,
+      )
+      return result.changes === 1 ? this.task(id) : undefined
+    })
   }
   updateTask(id: string, patch: Partial<Pick<TaskRecord, 'status' | 'engine' | 'error' | 'headRevision' | 'agentSession' | 'attempts' | 'startedAt' | 'finishedAt' | 'instructions' | 'priority' | 'maxAttempts'>> & { usage?: UsageTotals; options?: Record<string, unknown> }): void {
     const map: Record<string, string> = {
@@ -316,12 +340,18 @@ export class Repo {
   }
 
   /* revisions */
-  addRevision(taskId: string, parentId: string | null, doc: EditDocument, message: string, author: string): RevisionRecord {
+  addRevision(taskId: string, parentId: string | null, doc: EditDocument, message: string, author: string, expectedHead: string | null = parentId): RevisionRecord {
     const id = newId('rev')
-    const seq = Number(this.db.get<{ m: number | null }>('SELECT max(seq) m FROM revisions WHERE task_id = ?', taskId)?.m ?? 0) + 1
     this.db.tx(() => {
+      const task = this.db.get<{ head_revision: string | null }>('SELECT head_revision FROM tasks WHERE id = ?', taskId)
+      if (task === undefined) throw new ChengyingError('not-found', `no task ${taskId}`)
+      if (task.head_revision !== expectedHead || parentId !== expectedHead) {
+        throw new ChengyingError('conflict', `task ${taskId} head changed; revision was not committed`, { expected: expectedHead, actual: task.head_revision })
+      }
+      const seq = Number(this.db.get<{ m: number | null }>('SELECT max(seq) m FROM revisions WHERE task_id = ?', taskId)?.m ?? 0) + 1
       this.db.upsert('revisions', { id, task_id: taskId, parent_id: parentId, seq, doc_json: JSON.stringify(doc), message, author, created_at: nowIso(), preview_path: null, stats_json: null })
-      this.db.run('UPDATE tasks SET head_revision = ?, updated_at = ? WHERE id = ?', id, nowIso(), taskId)
+      const updated = this.db.run('UPDATE tasks SET head_revision = ?, updated_at = ? WHERE id = ? AND head_revision IS ?', id, nowIso(), taskId, expectedHead)
+      if (updated.changes !== 1) throw new ChengyingError('conflict', `task ${taskId} head CAS failed`)
     })
     return this.revision(id) as RevisionRecord
   }
@@ -365,19 +395,70 @@ export class Repo {
   }
 
   /* exports */
-  addExport(e: { taskId: string | null; shotId: string; revisionId: string | null; path: string; format: string; verified: boolean; verify: unknown; recipePath: string | null }): string {
+  addExport(e: { taskId: string | null; shotId: string; revisionId: string | null; path: string; format: string; verified: boolean; verify: unknown; recipePath: string | null; rawCopyPath?: string | null; c2paManifestPath?: string | null }): string {
     const id = newId('exp')
-    this.db.upsert('exports', { id, task_id: e.taskId, shot_id: e.shotId, revision_id: e.revisionId, path: e.path, format: e.format, verified: e.verified ? 1 : 0, verify_json: JSON.stringify(e.verify), recipe_path: e.recipePath, created_at: nowIso() })
+    this.db.upsert('exports', { id, task_id: e.taskId, shot_id: e.shotId, revision_id: e.revisionId, path: e.path, format: e.format, verified: e.verified ? 1 : 0, verify_json: JSON.stringify(e.verify), recipe_path: e.recipePath, raw_copy_path: e.rawCopyPath ?? null, c2pa_manifest_path: e.c2paManifestPath ?? null, created_at: nowIso() })
     return id
   }
-  exports(): Array<{ id: string; taskId: string | null; shotId: string; revisionId: string | null; path: string; format: string; verified: boolean; verify: unknown; recipePath: string | null; createdAt: string }> {
+  exports(): Array<{ id: string; taskId: string | null; shotId: string; revisionId: string | null; path: string; format: string; verified: boolean; verify: unknown; recipePath: string | null; rawCopyPath: string | null; c2paManifestPath: string | null; createdAt: string }> {
     return this.db.all<R>('SELECT * FROM exports ORDER BY created_at DESC').map(r => ({
       id: String(r.id), taskId: s(r.task_id), shotId: String(r.shot_id), revisionId: s(r.revision_id), path: String(r.path), format: String(r.format),
-      verified: Number(r.verified) === 1, verify: parseJson(s(r.verify_json), null), recipePath: s(r.recipe_path), createdAt: String(r.created_at),
+      verified: Number(r.verified) === 1, verify: parseJson(s(r.verify_json), null), recipePath: s(r.recipe_path), rawCopyPath: s(r.raw_copy_path), c2paManifestPath: s(r.c2pa_manifest_path), createdAt: String(r.created_at),
     }))
+  }
+  exportAtPath(path: string): { id: string; taskId: string | null; shotId: string; revisionId: string | null } | undefined {
+    const r = this.db.get<R>('SELECT id, task_id, shot_id, revision_id FROM exports WHERE path = ? ORDER BY created_at DESC LIMIT 1', path)
+    return r === undefined ? undefined : { id: String(r.id), taskId: s(r.task_id), shotId: String(r.shot_id), revisionId: s(r.revision_id) }
   }
   isExportPath(path: string): boolean {
     return this.db.get('SELECT 1 FROM exports WHERE path = ?', path) !== undefined
+  }
+  addDeliveryArtifact(input: { path: string; shotId: string; sourcePath: string; kind: 'raw' | 'raster'; bytes: number }): void {
+    this.db.upsert('delivery_artifacts', { id: newId('delivery'), path: input.path, shot_id: input.shotId, source_path: input.sourcePath, kind: input.kind, bytes: input.bytes, created_at: nowIso() }, ['path'])
+  }
+  deliveryArtifactAtPath(path: string): { id: string; shotId: string; sourcePath: string } | undefined {
+    const row = this.db.get<R>('SELECT id, shot_id, source_path FROM delivery_artifacts WHERE path = ?', path)
+    return row === undefined ? undefined : { id: String(row.id), shotId: String(row.shot_id), sourcePath: String(row.source_path) }
+  }
+  /** Paths Chengying generated inside otherwise user-controlled delivery roots. */
+  generatedArtifactPaths(): Set<string> {
+    const paths = new Set<string>()
+    for (const row of this.db.all<R>(`SELECT path, recipe_path, raw_copy_path, c2pa_manifest_path FROM exports`)) {
+      for (const key of ['path', 'recipe_path', 'raw_copy_path', 'c2pa_manifest_path']) {
+        const value = s(row[key])
+        if (value !== null) paths.add(value)
+      }
+    }
+    for (const row of this.db.all<{ path: string }>('SELECT path FROM delivery_artifacts')) paths.add(row.path)
+    return paths
+  }
+
+  recordGeneratedAsset(input: Omit<GeneratedAssetReceipt, 'id' | 'createdAt'>): GeneratedAssetReceipt {
+    const receipt: GeneratedAssetReceipt = { ...input, id: newId('ga'), createdAt: nowIso() }
+    this.db.run(
+      `INSERT INTO generated_assets
+       (id, authorization_id, task_id, shot_id, base_revision_id, provider_id, asset_path, asset_sha256,
+        patch_asset_path, patch_asset_sha256, detail_json, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      receipt.id, receipt.authorizationId, receipt.taskId, receipt.shotId, receipt.baseRevisionId,
+      receipt.providerId, receipt.assetPath, receipt.assetSha256, receipt.patchAssetPath,
+      receipt.patchAssetSha256, JSON.stringify(receipt.detail), receipt.createdAt,
+    )
+    return receipt
+  }
+  generatedAsset(id: string): GeneratedAssetReceipt | undefined {
+    const r = this.db.get<R>('SELECT * FROM generated_assets WHERE id = ?', id)
+    if (r === undefined) return undefined
+    return {
+      id: String(r.id), authorizationId: String(r.authorization_id), taskId: String(r.task_id),
+      shotId: String(r.shot_id), baseRevisionId: String(r.base_revision_id), providerId: String(r.provider_id),
+      assetPath: String(r.asset_path), assetSha256: String(r.asset_sha256), patchAssetPath: s(r.patch_asset_path),
+      patchAssetSha256: s(r.patch_asset_sha256), detail: parseJson(s(r.detail_json), {}), createdAt: String(r.created_at),
+    }
+  }
+
+  deleteGeneratedAsset(id: string): void {
+    this.db.run('DELETE FROM generated_assets WHERE id = ?', id)
   }
 
   /* preferences, feedback, authorizations */
@@ -404,8 +485,11 @@ export class Repo {
       createdAt: String(r.created_at), expiresAt: s(r.expires_at), revoked: Number(r.revoked) === 1, uses: Number(r.uses), maxUses: n(r.max_uses),
     }))
   }
-  consumeAuthorization(id: string): void {
-    this.db.run('UPDATE authorizations SET uses = uses + 1 WHERE id = ?', id)
+  consumeAuthorization(id: string): boolean {
+    return this.db.run(`UPDATE authorizations SET uses = uses + 1
+      WHERE id = ? AND scope = 'generative' AND revoked = 0
+        AND (expires_at IS NULL OR expires_at > ?)
+        AND (max_uses IS NULL OR uses < max_uses)`, id, nowIso()).changes === 1
   }
   revokeAuthorization(id: string): void {
     this.db.run('UPDATE authorizations SET revoked = 1 WHERE id = ?', id)

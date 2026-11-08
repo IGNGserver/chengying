@@ -5,8 +5,8 @@
  * served only from Chengying-owned directories (previews, renders, exports).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { createReadStream, existsSync, statSync } from 'node:fs'
-import { extname } from 'node:path'
+import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import type { ChengyingRuntime } from './runtime.ts'
 import type { ConnectionService, HostContext, WebServerService } from './host-types.ts'
 import { selectVlmCandidates, shotRow } from './tools/cull.ts'
@@ -58,20 +58,34 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 
 const MIME: Record<string, string> = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.avif': 'image/avif' }
 
-/** Serve a file only when it lives inside one of the project's Chengying-owned roots. */
-export async function sendFile(project: Project, res: ServerResponse, path: string | null | undefined): Promise<void> {
+/** Serve a generated file, or one exact artifact recorded by an export ID. */
+export async function sendFile(project: Project, res: ServerResponse, path: string | null | undefined, options: { recordedExport?: boolean } = {}): Promise<void> {
   if (path === null || path === undefined || !existsSync(path)) { sendJson(res, 404, { code: 'not-found' }); return }
-  const owned = [project.stateDir, project.exportDir]
-  if (!owned.some(root => isInside(path, root))) { sendJson(res, 403, { code: 'permission-denied' }); return }
-  const st = statSync(path)
+  let served: string
+  try {
+    const absolute = resolve(path)
+    served = realpathSync.native(absolute)
+    if (options.recordedExport === true) {
+      // The DB supplies the path, not the request. Reject replacing a recorded
+      // artifact with a symlink to an original or another sensitive file.
+      const expected = join(realpathSync.native(dirname(absolute)), basename(absolute))
+      const same = process.platform === 'win32' ? served.toLowerCase() === expected.toLowerCase() : served === expected
+      if (!same) { sendJson(res, 403, { code: 'permission-denied' }); return }
+    } else {
+      const owned = [project.stateDir, project.exportDir].map(root => existsSync(root) ? realpathSync.native(root) : resolve(root))
+      if (!owned.some(root => isInside(served, root))) { sendJson(res, 403, { code: 'permission-denied' }); return }
+    }
+  } catch { sendJson(res, 404, { code: 'not-found' }); return }
+  const st = statSync(served)
+  if (!st.isFile()) { sendJson(res, 404, { code: 'not-found' }); return }
   // Headers go out synchronously so the router never appends a JSON body.
   res.writeHead(200, {
-    'content-type': MIME[extname(path).toLowerCase()] ?? 'application/octet-stream',
+    'content-type': MIME[extname(served).toLowerCase()] ?? 'application/octet-stream',
     'content-length': String(st.size),
     'cache-control': 'private, max-age=60',
   })
   await new Promise<void>((resolve) => {
-    const stream = createReadStream(path)
+    const stream = createReadStream(served)
     stream.on('error', () => { res.destroy(); resolve() })
     res.on('close', () => { stream.destroy(); resolve() })
     stream.pipe(res)
@@ -266,9 +280,13 @@ export function buildRouter(rt: ChengyingRuntime): ApiRouter {
       if (path === null || !existsSync(path)) path = (await rt.edit(project).render(rev.taskId, { revisionId: rev.id, maxEdge: rt.config.editing.previewEdge })).path
       await sendFile(project, res, path)
     })
-    .add('GET', '/p/:id/export-file/:exp', async (p, _req, res) => {
+    .add('GET', '/p/:id/export-file/:exp', async (p, req, res) => {
       const project = P(p.id as string)
-      await sendFile(project, res, project.repo.exports().find(e => e.id === p.exp)?.path)
+      const record = project.repo.exports().find(e => e.id === p.exp)
+      const kind = req.query.get('kind') ?? 'image'
+      if (!['image', 'raw', 'recipe', 'manifest'].includes(kind)) throw new ChengyingError('invalid-argument', 'kind must be image, raw, recipe or manifest')
+      const path = kind === 'raw' ? record?.rawCopyPath : kind === 'recipe' ? record?.recipePath : kind === 'manifest' ? record?.c2paManifestPath : record?.path
+      await sendFile(project, res, path, { recordedExport: true })
     })
     .add('GET', '/p/:id/authorizations', async (p) => ({ authorizations: P(p.id as string).repo.authorizations() }))
     .add('POST', '/p/:id/authorizations', async (p, req) => {

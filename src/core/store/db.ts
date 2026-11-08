@@ -85,6 +85,55 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX originals_baseline_path ON originals_baseline(path);
   `,
+  // v3 — immutable proof that a generated asset came from the authorized
+  // provider flow. Authorization validity is checked when the receipt is
+  // created; rendering checks this receipt and content hashes, not the grant's
+  // current revocable state.
+  `
+  CREATE TABLE generated_assets (
+    id TEXT PRIMARY KEY,
+    authorization_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    shot_id TEXT NOT NULL,
+    base_revision_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    asset_path TEXT NOT NULL,
+    asset_sha256 TEXT NOT NULL,
+    patch_asset_path TEXT,
+    patch_asset_sha256 TEXT,
+    detail_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX generated_assets_task ON generated_assets(task_id);
+  CREATE INDEX generated_assets_authorization ON generated_assets(authorization_id);
+  `,
+  // v4 — stable source identity and soft-delete reconciliation. Rows are kept
+  // for tasks, selections and audit history; only active shots appear in culling.
+  `
+  ALTER TABLE files ADD COLUMN content_version TEXT;
+  ALTER TABLE shots ADD COLUMN source_version TEXT;
+  ALTER TABLE shots ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+  `,
+  // v5 — keep every user-downloadable artifact bound to its export identity.
+  `
+  ALTER TABLE exports ADD COLUMN raw_copy_path TEXT;
+  ALTER TABLE exports ADD COLUMN c2pa_manifest_path TEXT;
+  `,
+  // v6 — byte-for-byte original deliveries are generated artifacts too: keep
+  // their identities so custom delivery folders can be scanned without
+  // ingesting Chengying's own copies or hiding unrelated originals.
+  `
+  CREATE TABLE delivery_artifacts (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    shot_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX delivery_artifacts_shot ON delivery_artifacts(shot_id);
+  `,
 ]
 
 export type Row = Record<string, SQLInputValue>

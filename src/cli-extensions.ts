@@ -18,10 +18,12 @@ cliExtensions.push({
     const { join, resolve } = await import('node:path')
     const sharp = (await import('sharp')).default
     const args = [...pos]
-    const flag = (n: string): string | undefined => { const i = args.indexOf(n); if (i < 0) return undefined; const v = args[i + 1]; args.splice(i, 2); return v }
+    const flag = (n: string): string | undefined => { const i = args.indexOf(n); if (i < 0) return undefined; const v = args[i + 1]; if (v === undefined || v.startsWith('--')) throw new Error(`${n} requires a value`); args.splice(i, 2); return v }
     const input = flag('--input')
     const report = flag('--report')
-    const only = flag('--only')?.split(',')
+    const onlyFlag = flag('--only')
+    const only = onlyFlag?.split(',').map(value => value.trim())
+    if (only !== undefined && (only.length === 0 || only.some(value => value.length === 0))) throw new Error('--only must contain non-empty operation ids')
     const state = opts.state ?? defaultStateRoot()
     const registry = new EngineRegistry(join(state, 'engines'))
     try {
@@ -61,10 +63,14 @@ cliExtensions.push({
         const engineFlag = flag('--engine')
         const outPath = flag('--out') ?? join(state, 'preview.jpg')
         const edge = Number(flag('--edge') ?? 1400)
+        if (!Number.isInteger(edge) || edge <= 0) throw new Error('--edge must be a positive integer')
+        const inputPath = resolve(file); const outputPath = resolve(outPath)
+        const canonical = (path: string): string => process.platform === 'win32' ? path.toLowerCase() : path
+        if (canonical(inputPath) === canonical(outputPath)) throw new Error('preview output must not overwrite its input')
         const id = engineFlag ?? await registry.pick(/\.(nef|cr2|cr3|arw|raf|rw2|orf|dng|pef|srw)$/i.test(file) ? 'raw' : 'raster')
         const catalog = await registry.catalog(id)
         const stage: import('./core/types.ts').EditStage = { id: 'stage_preview', engine: id, steps: [] }
-        const rendered = await registry.get(id).render({ input: resolve(file), inputKind: /\.(nef|cr2|cr3|arw|raf|rw2|orf|dng|pef|srw)$/i.test(file) ? 'raw' : 'raster', stage, output: resolve(outPath), format: 'jpeg', quality: 84, maxEdge: edge, scratchDir: join(state, 'preview-scratch') }, catalog)
+        const rendered = await registry.get(id).render({ input: inputPath, inputKind: /\.(nef|cr2|cr3|arw|raf|rw2|orf|dng|pef|srw)$/i.test(file) ? 'raw' : 'raster', stage, output: outputPath, format: 'jpeg', quality: 84, maxEdge: edge, scratchDir: join(state, 'preview-scratch') }, catalog)
         opts.out({ engine: id, output: rendered.output, width: rendered.width, height: rendered.height, durationMs: rendered.durationMs, warnings: rendered.warnings })
         return 0
       }

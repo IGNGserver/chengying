@@ -44,30 +44,45 @@ export function stableStringify(value: unknown): string {
 export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>, signal?: AbortSignal): Promise<R[]> {
   const results = new Array<R>(items.length)
   let next = 0
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    while (true) {
-      signal?.throwIfAborted()
-      const index = next++
-      if (index >= items.length) return
-      results[index] = await fn(items[index] as T, index)
+  let failure: unknown
+  let failed = false
+  const count = items.length === 0 ? 0 : Math.max(1, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 1, items.length))
+  const workers = Array.from({ length: count }, async () => {
+    while (!failed) {
+      try {
+        signal?.throwIfAborted()
+        const index = next++
+        if (index >= items.length) return
+        results[index] = await fn(items[index] as T, index)
+      } catch (error) {
+        if (!failed) { failed = true; failure = error }
+        return
+      }
     }
   })
+  // Wait for every in-flight worker to settle before propagating a failure;
+  // callers may then close resources without detached work still using them.
   await Promise.all(workers)
+  if (failed) throw failure
   return results
 }
 
 /** A counting semaphore whose limit may change at runtime. */
+function normalizeLimit(limit: number): number {
+  return Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1
+}
+
 export class Semaphore {
   private active = 0
   private readonly waiters: Array<() => void> = []
 
-  constructor(private limitValue: number) {}
+  constructor(private limitValue: number) { this.limitValue = normalizeLimit(limitValue) }
 
   get limit(): number { return this.limitValue }
   get inFlight(): number { return this.active }
 
   setLimit(limit: number): void {
-    this.limitValue = Math.max(1, limit)
+    this.limitValue = normalizeLimit(limit)
     this.drain()
   }
 
@@ -90,7 +105,13 @@ export class Semaphore {
       signal?.addEventListener('abort', onAbort, { once: true })
       this.waiters.push(waiter)
     })
-    // drain() already reserved the slot for this waiter.
+    // drain() reserved the slot, but abort may fire before this continuation.
+    // Return that slot instead of leaking capacity to later callers.
+    try { signal?.throwIfAborted() } catch (error) {
+      this.active--
+      this.drain()
+      throw error
+    }
     return this.releaser()
   }
 
@@ -124,7 +145,9 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export function chunk<T>(items: readonly T[], size: number): T[][] {
+  if (!Number.isFinite(size) || size < 1) throw new RangeError('chunk size must be positive')
+  const stride = Math.floor(size)
   const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  for (let i = 0; i < items.length; i += stride) out.push(items.slice(i, i + stride))
   return out
 }

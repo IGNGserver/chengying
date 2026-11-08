@@ -16,7 +16,7 @@ export function parsePp3(text: string): Pp3 {
     }
     const eq = line.indexOf('=')
     if (eq < 0 || section === undefined) continue
-    section.set(line.slice(0, eq), line.slice(eq + 1))
+    section.set(line.slice(0, eq), unescape(line.slice(eq + 1)))
   }
   return out
 }
@@ -24,6 +24,22 @@ export function parsePp3(text: string): Pp3 {
 /** GLib key-file escaping for values (\\, \n, \t, leading space). */
 function escape(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/\r/g, '\\r').replace(/^ /, '\\s')
+}
+
+/** Decode GLib key-file escapes without losing unknown legacy sequences. */
+function unescape(v: string): string {
+  let out = ''
+  for (let i = 0; i < v.length; i++) {
+    if (v[i] !== '\\' || i === v.length - 1) { out += v[i]; continue }
+    const next = v[++i] as string
+    if (next === 'n') out += '\n'
+    else if (next === 't') out += '\t'
+    else if (next === 'r') out += '\r'
+    else if (next === 's') out += ' '
+    else if (next === '\\') out += '\\'
+    else out += `\\${next}`
+  }
+  return out
 }
 
 export function writePp3(p: Pp3, header = true): string {

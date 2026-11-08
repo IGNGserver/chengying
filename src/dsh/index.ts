@@ -9,7 +9,7 @@
  * The split keeps 30+ photo tool schemas out of unrelated DSH sessions.
  */
 import { ChengyingRuntime, type Log } from './runtime.ts'
-import { Config as ConfigSchema, type Config as ChengyingConfig } from './config.ts'
+import { Config as ConfigSchema, validateConfig, type Config as ChengyingConfig } from './config.ts'
 import { cullTools } from './tools/cull.ts'
 import { engineTools, taskManagementTools, taskTools } from './tools/edit.ts'
 import { aiTaskTools, aiTools } from './tools/ai.ts'
@@ -114,7 +114,7 @@ function ensureOrchestrator(ctx: HostContext, rt: ChengyingRuntime): void {
 
 export function apply(ctx: HostContext, config: ChengyingConfig): void {
   const log: Log = (typeof ctx.logger === 'function' ? ctx.logger('chengying') : undefined) ?? console
-  const resolved = ConfigSchema(config ?? {}) as ChengyingConfig
+  const resolved = validateConfig(ConfigSchema(config ?? {}) as ChengyingConfig)
   const mode = resolveMode(ctx, resolved.mode)
 
   if (mode === 'host' || mode === 'both') {

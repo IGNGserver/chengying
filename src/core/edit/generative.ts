@@ -16,6 +16,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ChengyingError } from '../util/errors.ts'
 import { run } from '../util/proc.ts'
+import { newId, sleep } from '../util/misc.ts'
 
 export interface GenerativeProvider {
   id: string
@@ -54,7 +55,7 @@ export async function generateWith(provider: GenerativeProvider, req: GenerateRe
 
 async function viaCommand(p: GenerativeProvider, req: GenerateRequest): Promise<{ path: string; detail: Record<string, unknown> }> {
   if (p.command === undefined) throw new ChengyingError('invalid-argument', `provider ${p.id}: command missing`)
-  const output = join(req.outDir, `gen-${Date.now()}.png`)
+  const output = join(req.outDir, `gen-${newId('asset')}.png`)
   const args = (p.args ?? ['{input}', '{mask}', '{output}', '{prompt}']).map(a => a.replaceAll('{input}', req.image).replaceAll('{mask}', req.mask ?? '').replaceAll('{output}', output).replaceAll('{prompt}', req.prompt).replaceAll('{kind}', req.kind).replaceAll('{seed}', String(req.seed ?? 0)))
   const r = await run(p.command, args, { timeoutMs: p.timeoutMs ?? 900_000, signal: req.signal })
   if (r.code !== 0 || !existsSync(output)) throw new ChengyingError('engine-failed', `provider ${p.id} failed (${r.code}): ${r.stderr.slice(-800) || r.stdout.slice(-800)}`)
@@ -119,7 +120,11 @@ async function viaOpenAi(p: GenerativeProvider, req: GenerateRequest): Promise<{
   const item = body.data?.[0]
   let buf: Buffer
   if (item?.b64_json !== undefined) buf = Buffer.from(item.b64_json, 'base64')
-  else if (item?.url !== undefined) buf = Buffer.from(await (await fetch(item.url, { signal: req.signal })).arrayBuffer())
+  else if (item?.url !== undefined) {
+    const downloaded = await fetch(item.url, { signal: req.signal })
+    if (!downloaded.ok) throw new ChengyingError('engine-failed', `provider ${p.id}: image download HTTP ${downloaded.status}`)
+    buf = Buffer.from(await downloaded.arrayBuffer())
+  }
   else throw new ChengyingError('engine-failed', `provider ${p.id}: empty response`)
   if (padLeft > 0 || padRight > 0 || padTop > 0 || padBottom > 0) {
     try {
@@ -131,7 +136,7 @@ async function viaOpenAi(p: GenerativeProvider, req: GenerateRequest): Promise<{
       // Keep original buffer if cropping metadata fails.
     }
   }
-  const out = join(req.outDir, `gen-${Date.now()}.png`)
+  const out = join(req.outDir, `gen-${newId('asset')}.png`)
   writeFileSync(out, buf)
   return { path: out, detail: { model: p.model ?? 'gpt-image-1', url: base, size: target.size } }
 }
@@ -145,7 +150,9 @@ async function viaComfy(p: GenerativeProvider, req: GenerateRequest): Promise<{ 
     form.set('overwrite', 'true')
     const r = await fetch(`${base}/upload/image`, { method: 'POST', body: form, signal: req.signal })
     if (!r.ok) throw new ChengyingError('engine-failed', `comfyui upload failed: HTTP ${r.status}`)
-    return ((await r.json()) as { name: string }).name
+  const uploaded = (await r.json()) as { name?: unknown }
+    if (typeof uploaded.name !== 'string' || uploaded.name === '') throw new ChengyingError('engine-failed', 'comfyui upload returned no file name')
+    return uploaded.name
   }
   const input = await upload(req.image)
   const mask = req.mask !== undefined ? await upload(req.mask) : ''
@@ -154,17 +161,21 @@ async function viaComfy(p: GenerativeProvider, req: GenerateRequest): Promise<{ 
     .replaceAll('{{prompt}}', JSON.stringify(req.prompt).slice(1, -1)).replaceAll('{{seed}}', String(req.seed ?? Math.floor(Math.random() * 2 ** 31)))
   const queued = await fetch(`${base}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: JSON.parse(text) }), signal: req.signal })
   if (!queued.ok) throw new ChengyingError('engine-failed', `comfyui /prompt: HTTP ${queued.status} ${await queued.text()}`)
-  const { prompt_id: id } = await queued.json() as { prompt_id: string }
+  const { prompt_id: id } = await queued.json() as { prompt_id?: unknown }
+  if (typeof id !== 'string' || id === '') throw new ChengyingError('engine-failed', 'comfyui /prompt returned no prompt id')
   const deadline = Date.now() + (p.timeoutMs ?? 900_000)
   while (Date.now() < deadline) {
     req.signal?.throwIfAborted()
-    await new Promise(r => setTimeout(r, 1500))
-    const h = await (await fetch(`${base}/history/${id}`, { signal: req.signal })).json() as Record<string, { outputs?: Record<string, { images?: Array<{ filename: string; subfolder: string; type: string }> }> }>
+    await sleep(Math.min(1500, Math.max(1, deadline - Date.now())), req.signal)
+    const history = await fetch(`${base}/history/${id}`, { signal: req.signal })
+    if (!history.ok) throw new ChengyingError('engine-failed', `comfyui /history: HTTP ${history.status}`)
+    const h = await history.json() as Record<string, { outputs?: Record<string, { images?: Array<{ filename: string; subfolder: string; type: string }> }> }>
     const images = Object.values(h[id]?.outputs ?? {}).flatMap(o => o.images ?? [])
     const img = images[0]
     if (img !== undefined) {
       const r = await fetch(`${base}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder)}&type=${encodeURIComponent(img.type)}`, { signal: req.signal })
-      const out = join(req.outDir, `gen-${Date.now()}.png`)
+      if (!r.ok) throw new ChengyingError('engine-failed', `comfyui /view: HTTP ${r.status}`)
+      const out = join(req.outDir, `gen-${newId('asset')}.png`)
       writeFileSync(out, Buffer.from(await r.arrayBuffer()))
       return { path: out, detail: { promptId: id, url: base } }
     }

@@ -16,7 +16,6 @@ import type { AgentLike, HostContext, SubagentActivation, SubagentsService, Tool
 import { taskTools } from './tools/edit.ts'
 import type { Project } from '../core/project.ts'
 import type { TaskRecord } from '../core/types.ts'
-import { defineTool, str, obj } from './tool.ts'
 import { ChengyingError, errorMessage } from '../core/util/errors.ts'
 import { round, Semaphore } from '../core/util/misc.ts'
 import { emptyUsage } from '../core/store/repo.ts'
@@ -24,7 +23,7 @@ import { emptyUsage } from '../core/store/repo.ts'
 /** Global tools an editing child may still see (everything else is hidden). */
 export const CHILD_GLOBAL_TOOLS = ['edit_engines', 'edit_capabilities', 'edit_describe', 'edit_native', 'skill']
 
-interface Child { projectId: string; taskId: string }
+interface Child { projectId: string; taskId: string; setupError?: string; ready?: boolean }
 
 /** Extract actionable pixel-level measurements from culling features so sub-agents do not guess angles, casts or mask coordinates. */
 export function photoDiagnostics(project: Project, shotId: string): Record<string, unknown> | undefined {
@@ -148,30 +147,25 @@ export class EditOrchestrator {
       const child = this.children.get(String(agent.id))
       if (child === undefined) return
       if (agent.session?.id !== undefined) this.children.set(String(agent.session.id), child)
+      const disposers: Array<() => void> = []
       try {
         const scoped = agent.ctx.tools
         const tools = [...taskTools(this.rt, child), ...this.childToolFactories.flatMap(f => f(child))]
-        const skillTool = this.rt.config.editing.childProvider !== 'spawn' ? [] : [
-          defineTool({
-            name: 'skill',
-            description: 'Load a professional retouching skill for the current session.',
-            parameters: obj({ name: str('Skill name') }, ['name']),
-            async run({ name }: { name: string }) {
-              const skill = (self as any).rt.skills?.list().find((s: any) => s.name === name)
-              return skill ? skill.content : 'Skill not found'
-            }
-          })
-        ]
-        const toolsWithSkills = [...tools, ...skillTool]
-        const disposers = toolsWithSkills.map(t => scoped.register(t))
-        const known = [...this.childGlobalTools, 'skill']
-        try { disposers.push(scoped.restrict({ allow: known })) } catch (error) {
-          // Unknown names (e.g. a tool family not mounted) — restrict to what exists.
-          this.rt.log.warn('chengying: child tool restriction:', errorMessage(error))
-        }
+        // The Host's real skill tool is inherited when available. Do not invent
+        // a browser-global runtime adapter in the Node child process.
+        disposers.push(...tools.map(t => scoped.register(t)))
+        const known = [...new Set([...this.childGlobalTools, ...tools.map(t => t.name)])]
+        // Restriction is a security boundary, not an optional compatibility
+        // enhancement. Any failure makes the activation unusable.
+        disposers.push(scoped.restrict({ allow: known }))
         agent.ctx.effect(() => () => { for (const d of disposers) { try { d() } catch { /* already gone */ } } }, 'chengying: child tools')
+        child.ready = true
       } catch (error) {
-        this.rt.log.error('chengying: cannot equip editing sub-agent:', errorMessage(error))
+        for (const d of disposers) { try { d() } catch { /* best-effort cleanup */ } }
+        child.setupError = errorMessage(error)
+        try { agent.ctx.tools.restrict({ allow: [] }) } catch { /* activation is disposed by runTask */ }
+        this.active.get(child.taskId)?.abort.abort(new ChengyingError('internal', `cannot isolate editing sub-agent: ${child.setupError}`))
+        this.rt.log.error('chengying: cannot equip editing sub-agent:', child.setupError)
       }
     })
     const offEvent = this.ctx.on('session/event', (session: { id?: string }, event: { type?: string; data?: { usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number } } }) => {
@@ -277,6 +271,14 @@ How to work:
     return { task: taskId, status: project.repo.task(taskId)?.status }
   }
 
+  async close(): Promise<void> {
+    const activations = [...this.active.values()]
+    for (const active of activations) active.abort.abort(new ChengyingError('cancelled', 'editing orchestrator shutting down'))
+    await Promise.allSettled(activations.map(async active => { await active.activation?.dispose() }))
+    this.active.clear()
+    this.children.clear()
+  }
+
   /** Run queued tasks until none remain (or the signal aborts). */
   async run(project: Project, exec: ToolRunContext, opts: { taskIds?: string[]; selectionId?: string; concurrency?: number; signal: AbortSignal; progress?: (stage: string, done: number, total: number) => void }): Promise<{ counts: Record<string, number>; processed: number }> {
     const subagents = this.ctx.get('subagents') as SubagentsService | undefined
@@ -317,8 +319,11 @@ How to work:
       // claim before yielding so the loop does not pick it twice
       const abort = new AbortController()
       const childId = randomUUID()
+      const claimed = project.repo.claimQueuedTask(next.id, childId)
+      if (claimed === undefined) { release(); continue }
+      project.repo.addEvent(next.id, 'info', 'status', `queued → running: sub-agent ${childId.slice(0, 8)} (attempt ${claimed.attempts}/${claimed.maxAttempts})`)
       this.active.set(next.id, { abort, childId })
-      const p = this.runOne(project, next, parent, subagents, childId, abort, opts.signal).finally(() => {
+      const p = this.runOne(project, claimed, parent, subagents, childId, abort, opts.signal).finally(() => {
         release()
         this.active.delete(next.id)
         processed++
@@ -335,17 +340,16 @@ How to work:
 
   private async runOne(project: Project, task: TaskRecord, parent: AgentLike, subagents: SubagentsService, childId: string, abort: AbortController, outer: AbortSignal): Promise<void> {
     const svc = this.rt.edit(project)
-    const attempts = task.attempts + 1
-    project.repo.updateTask(task.id, { attempts, agentSession: childId })
-    svc.setStatus(task.id, 'running', { message: `sub-agent ${childId.slice(0, 8)} (attempt ${attempts}/${task.maxAttempts})` })
+    const attempts = task.attempts
     this.children.set(childId, { projectId: project.id, taskId: task.id })
     const signal = AbortSignal.any([abort.signal, outer])
     const agentOptions = this.rt.config.editing.childProvider !== undefined && this.rt.config.editing.childModel !== undefined
       ? { provider: this.rt.config.editing.childProvider, model: this.rt.config.editing.childModel }
       : undefined
     let outcome: { stopReason: string; text: string; diagnostic?: string } | undefined
+    let activation: SubagentActivation | undefined
     try {
-      const activation = await subagents.startActivation({
+      activation = await subagents.startActivation({
         provider: this.rt.config.editing.subagentProvider,
         label: `retouch ${task.shotId}`,
         childId,
@@ -355,12 +359,14 @@ How to work:
       })
       const live = this.active.get(task.id)
       if (live !== undefined) live.activation = activation
+      const setupError = this.children.get(childId)?.setupError
+      if (setupError !== undefined) throw new ChengyingError('internal', `cannot isolate editing sub-agent: ${setupError}`)
       const result = await activation.result
-      await activation.dispose().catch(() => undefined)
       outcome = { stopReason: result.stopReason, text: result.output.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('\n').slice(0, 2000), diagnostic: result.diagnostic }
     } catch (error) {
       outcome = { stopReason: signal.aborted ? 'aborted' : 'error', text: '', diagnostic: errorMessage(error) }
     } finally {
+      await activation?.dispose().catch(() => undefined)
       for (const [k, v] of this.children) {
         if (v.taskId === task.id) this.children.delete(k)
       }

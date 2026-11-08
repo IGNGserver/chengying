@@ -29,9 +29,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out the exact release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
           fetch-depth: 0
@@ -89,11 +90,11 @@ jobs:
           bash scripts/package-plugin.sh "$RELEASE_VERSION" "$output_dir"
           echo "artifact_dir=$output_dir" >> "$GITHUB_OUTPUT"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.33.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: pnpm
@@ -102,6 +103,7 @@ jobs:
         shell: bash
         env:
           ARTIFACT_DIR: ${{ steps.package.outputs.artifact_dir }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile
@@ -109,6 +111,7 @@ jobs:
           pnpm build
           pnpm test
           pnpm pack --pack-destination "$ARTIFACT_DIR"
+          node scripts/smoke-packed.mjs "$ARTIFACT_DIR/chengying-$RELEASE_VERSION.tgz"
           ls "$ARTIFACT_DIR"/chengying-*.tgz
           (cd "$ARTIFACT_DIR" && sha256sum chengying-*.tgz >> SHA256SUMS)
 
@@ -130,7 +133,7 @@ jobs:
           echo "body_path=$output_path" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: 澄影 ${{ steps.meta.outputs.tag }}

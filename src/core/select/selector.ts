@@ -16,6 +16,7 @@ import { visualDistance } from '../analysis/pixels.ts'
 import { DEFAULT_WEIGHTS, fuseScores } from '../analysis/scoring.ts'
 import { preferenceScore, type PreferenceProfile } from './preferences.ts'
 import { clamp, round } from '../util/misc.ts'
+import { ChengyingError } from '../util/errors.ts'
 
 export interface ShotDims {
   technical?: number
@@ -32,7 +33,7 @@ export interface ShotDims {
 
 function weightedAvg(parts: Array<[number | undefined, number]>): number | undefined {
   let a = 0; let w = 0
-  for (const [v, wt] of parts) if (v !== undefined && !Number.isNaN(v)) { a += v * wt; w += wt }
+  for (const [v, wt] of parts) if (v !== undefined && Number.isFinite(v) && Number.isFinite(wt) && wt > 0) { a += v * wt; w += wt }
   return w > 0 ? a / w : undefined
 }
 
@@ -96,9 +97,19 @@ function orientationOf(s: Shot): 'landscape' | 'portrait' | 'square' {
 }
 
 export function select(input: SelectorInput, spec: SelectionSpec): SelectionResult {
-  const weights = { ...DEFAULT_WEIGHTS, ...(spec.weights ?? {}) } as Record<string, number>
-  if (input.profile !== undefined) for (const [k, b] of Object.entries(input.profile.weightBias)) if (weights[k] !== undefined) weights[k] = (weights[k] as number) * b
+  const finite = (value: number | undefined, name: string): void => {
+    if (value !== undefined && !Number.isFinite(value)) throw new ChengyingError('invalid-argument', `${name} must be finite`)
+  }
+  finite(spec.count, 'count'); finite(spec.minScore, 'minScore'); finite(spec.maxCount, 'maxCount'); finite(spec.perScene, 'perScene'); finite(spec.diversity, 'diversity')
+  const weights = { ...DEFAULT_WEIGHTS } as Record<string, number>
+  for (const [key, value] of Object.entries(spec.weights ?? {})) {
+    if (!Object.hasOwn(weights, key) || typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new ChengyingError('invalid-argument', `invalid selection weight ${key}`)
+    weights[key] = value
+  }
+  if (input.profile !== undefined) for (const [k, b] of Object.entries(input.profile.weightBias)) if (weights[k] !== undefined && Number.isFinite(b) && b >= 0) weights[k] = (weights[k] as number) * b
   const diversity = clamp(spec.diversity ?? 0.35, 0, 1)
+  const kept = new Map<string, SelectionItem>()
+  for (const k of input.keep ?? []) if (k.locked || k.source === 'user') kept.set(k.shotId, k)
   const excluded = new Map<string, string>()
   const groupOf = (groups: Group[]): Map<string, string> => {
     const m = new Map<string, string>()
@@ -114,12 +125,14 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
   const require = (spec.requireTags ?? []).map(t => t.toLowerCase())
   const from = spec.timeRange?.from
   const to = spec.timeRange?.to
+  if ((from !== undefined && !Number.isFinite(Date.parse(from))) || (to !== undefined && !Number.isFinite(Date.parse(to)))) throw new ChengyingError('invalid-argument', 'timeRange bounds must be valid ISO dates')
+  if (from !== undefined && to !== undefined && from > to) throw new ChengyingError('invalid-argument', 'timeRange.from must not be after timeRange.to')
 
   const cands = new Map<string, Candidate>()
   for (const shot of input.shots) {
     const dims = mergeDims(input.scores.get(shot.id) ?? {}, input.profile)
     const tags = dims.tags.map(t => t.toLowerCase())
-    const forced = include.has(shot.id) || shot.userFlag === 'pick'
+    const forced = include.has(shot.id) || shot.userFlag === 'pick' || kept.get(shot.id)?.included === true
     if (!forced) {
       if (exclude.has(shot.id)) { excluded.set(shot.id, 'excluded by request'); continue }
       if ((spec.excludeRejected ?? true) && shot.userFlag === 'reject') { excluded.set(shot.id, 'rejected by user'); continue }
@@ -162,20 +175,18 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
   for (const g of [...input.groups.exact, ...input.groups.near]) {
     const members = g.members.map(m => cands.get(m.shotId)).filter((c): c is Candidate => c !== undefined)
     if (members.length < 2) continue
-    members.sort((a, b) => b.fused - a.fused)
+    const protectedPick = (candidate: Candidate): boolean => include.has(candidate.shot.id) || candidate.shot.userFlag === 'pick' || kept.get(candidate.shot.id)?.included === true
+    members.sort((a, b) => Number(protectedPick(b)) - Number(protectedPick(a)) || b.fused - a.fused)
     const best = members[0] as Candidate
     best.reasonBits.push(`best of ${members.length} similar`)
     for (const m of members.slice(1)) {
-      if (include.has(m.shot.id) || m.shot.userFlag === 'pick') continue
+      if (protectedPick(m)) continue
       collapsed.add(m.shot.id)
       excluded.set(m.shot.id, `duplicate of ${best.shot.id}`)
     }
   }
   const pool = [...cands.values()].filter(c => !collapsed.has(c.shot.id))
   const floor = spec.minScore
-  const kept = new Map<string, SelectionItem>()
-  for (const k of input.keep ?? []) if (k.locked || k.source === 'user') kept.set(k.shotId, k)
-
   const chosen: Candidate[] = []
   const chosenSet = new Set<string>()
   const sim = (a: Candidate, b: Candidate): number => {
@@ -213,7 +224,7 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
 
   if (spec.count !== undefined) {
     const target = Math.max(0, Math.floor(spec.count))
-    const perScene = spec.perScene ?? Math.max(1, Math.ceil(target / Math.max(1, input.groups.scene.length) * 1.5))
+    const perScene = spec.perScene === undefined ? Math.max(1, Math.ceil(target / Math.max(1, input.groups.scene.length) * 1.5)) : Math.max(1, Math.floor(spec.perScene))
     const narrative = spec.narrative ?? true
     if (narrative && input.groups.segment.length > 1 && target > chosen.length) {
       // Narrative quotas: weight segments by sqrt(size) × their top quality.
@@ -249,8 +260,8 @@ export function select(input: SelectorInput, spec: SelectionSpec): SelectionResu
     }
   } else {
     const minScore = floor ?? 70
-    const perScene = spec.perScene ?? 2
-    const max = spec.maxCount ?? Number.POSITIVE_INFINITY
+    const perScene = spec.perScene === undefined ? 2 : Math.max(1, Math.floor(spec.perScene))
+    const max = spec.maxCount === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(spec.maxCount))
     const sorted = eligible.filter(c => c.fused >= minScore).sort((a, b) => b.fused - a.fused)
     for (const c of sorted) {
       if (chosen.length >= max) break

@@ -53,7 +53,7 @@ interface WalkEntry { path: string; ext: string }
 
 const SKIP_NAMES = new Set(['@eaDir', '#recycle', '$RECYCLE.BIN', 'System Volume Information', 'node_modules', '.git', '.Trashes', '.Spotlight-V100', '.fseventsd', '_chengying_inbox', '_chengying_export'])
 
-async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boolean, out: WalkEntry[], stats: { seen: number }, signal?: AbortSignal): Promise<void> {
+async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boolean, out: WalkEntry[], stats: { seen: number }, signal: AbortSignal | undefined, generated: ReadonlySet<string>): Promise<void> {
   const stack = [root]
   while (stack.length > 0) {
     signal?.throwIfAborted()
@@ -61,8 +61,11 @@ async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boo
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      continue
+    } catch (error) {
+      // An unreadable directory is not an empty directory. Abort before any
+      // reconciliation so a transient permission/I/O error cannot mark all of
+      // its photos missing.
+      throw new Error(`cannot read workspace directory ${dir}: ${errorMessage(error)}`, { cause: error })
     }
     for (const e of entries) {
       if (e.name.startsWith('.') || e.name.startsWith('._') || SKIP_NAMES.has(e.name)) continue
@@ -71,6 +74,7 @@ async function walk(root: string, skipDirs: readonly string[], sniffUnknown: boo
         if (skipDirs.some(s => isInside(p, s))) continue
         stack.push(p)
       } else if (e.isFile()) {
+        if (generated.has(p)) continue
         stats.seen++
         const ext = extname(e.name).slice(1).toLowerCase()
         if (RAW_EXTENSIONS.has(ext) || RASTER_EXTENSIONS.has(ext)) out.push({ path: p, ext })
@@ -123,8 +127,8 @@ export async function fullHash(path: string, signal?: AbortSignal): Promise<stri
   return `full:${h.digest('hex')}`
 }
 
-export function shotIdFor(primaryPath: string): string {
-  return `s_${createHash('sha1').update(primaryPath).digest('hex').slice(0, 16)}`
+export function shotIdFor(stablePrimaryId: string): string {
+  return `s_${createHash('sha1').update(stablePrimaryId).digest('hex').slice(0, 16)}`
 }
 
 function fileIdFor(path: string): string {
@@ -147,6 +151,20 @@ function captureTs(f: FileRecord, fallbackTzOffset?: string): number | null {
   return f.mtimeMs / 1000
 }
 
+function compatiblePair(raw: FileRecord, raster: FileRecord): boolean {
+  const rt = raw.meta.captureTime?.slice(0, 19)
+  const jt = raster.meta.captureTime?.slice(0, 19)
+  if (rt !== undefined && jt !== undefined && rt !== jt) return false
+  const rc = raw.meta.camera?.trim().toLowerCase()
+  const jc = raster.meta.camera?.trim().toLowerCase()
+  return rc === undefined || rc === '' || jc === undefined || jc === '' || rc === jc
+}
+
+function exactPair(raw: FileRecord, raster: FileRecord): boolean {
+  return raw.meta.captureTime !== undefined && raster.meta.captureTime !== undefined
+    && raw.meta.captureTime.slice(0, 19) === raster.meta.captureTime.slice(0, 19)
+}
+
 export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const { root, repo, metadata, signal } = opts
   const conc = opts.concurrency ?? 6
@@ -154,9 +172,11 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const entries: WalkEntry[] = []
   const stats = { seen: 0 }
   opts.onProgress?.({ phase: 'walk', done: 0, total: 0 })
-  await walk(root, opts.skipDirs, sniffUnknown, entries, stats, signal)
+  await walk(root, opts.skipDirs, sniffUnknown, entries, stats, signal, repo.generatedArtifactPaths())
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const errors: ScanResult['errors'] = []
+  const previousFiles = repo.files()
+  const previousShotByFile = new Map(previousFiles.flatMap(f => f.shotId === null ? [] : [[f.id, f.shotId] as const]))
   let added = 0
   let updated = 0
   let done = 0
@@ -190,7 +210,7 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         if (refined !== undefined) ext = refined
       }
       const rec: FileRecord = {
-        id: fileIdFor(path),
+        id: prev?.id ?? fileIdFor(path),
         shotId: null,
         path,
         relPath: relative(root, path),
@@ -201,11 +221,13 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         format: ext === 'jpeg' || ext === 'jpe' ? 'jpg' : ext === 'tif' ? 'tiff' : ext === 'hif' ? 'heif' : ext,
         size: st.size,
         mtimeMs: Math.round(st.mtimeMs),
-        sha256: await sampledHash(path, st.size),
+        sha256: prev === undefined ? await sampledHash(path, st.size) : await fullHash(path, signal),
+        contentVersion: null, // assigned immediately below from the final fingerprint
         status: 'ok',
         error: null,
         meta,
       }
+      rec.contentVersion = rec.sha256
       if (prev === undefined) added++
       else updated++
       opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
@@ -213,11 +235,26 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
     } catch (error) {
       if (signal?.aborted) throw error
       errors.push({ path, error: errorMessage(error) })
+      const prev = repo.fileByPath(path)
       opts.onProgress?.({ phase: 'metadata', done: ++done, total: entries.length, current: path })
+      // Preserve the last known identity and shot membership on a transient
+      // read error. The error status forces a retry on the next scan.
+      if (prev !== undefined) return { ...prev, status: 'error' as const, error: errorMessage(error) }
       return undefined
     }
   }, signal)
   const files = records.filter((r): r is FileRecord => r !== undefined)
+
+  // A rename can reuse an ID only when the old row has a full content hash and
+  // exactly one missing previous file matches it. Sampled hashes never prove
+  // identity; otherwise a lookalike file could inherit another photo's edits.
+  const walkedPaths = new Set(entries.map(e => e.path))
+  const missingPrevious = previousFiles.filter(f => !walkedPaths.has(f.path))
+  for (const f of files) {
+    if (repo.fileByPath(f.path)?.id === f.id || f.sha256 === null || !f.sha256.startsWith('full:')) continue
+    const matches = missingPrevious.filter(prev => prev.sha256 === f.sha256 && prev.size === f.size && prev.id !== f.id)
+    if (matches.length === 1) f.id = (matches[0] as FileRecord).id
+  }
 
   // Confirm sampled-hash collisions with a full hash (exact duplicates).
   const bySample = new Map<string, FileRecord[]>()
@@ -247,21 +284,35 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const looseRaster: FileRecord[] = []
   const looseRaw: FileRecord[] = []
   for (const e of byDirBase.values()) {
-    if (e.raw.length > 0 && e.raster.length > 0) shots.set(`pair:${e.raw[0]?.path}`, e)
-    else if (e.raw.length > 0) looseRaw.push(...e.raw)
-    else looseRaster.push(...e.raster)
+    const usedRaw = new Set<string>()
+    const usedRaster = new Set<string>()
+    for (const raster of [...e.raster].sort((a, b) => a.path.localeCompare(b.path))) {
+      const candidates = e.raw.filter(raw => !usedRaw.has(raw.path) && compatiblePair(raw, raster))
+      const exact = candidates.filter(raw => exactPair(raw, raster))
+      // Ambiguous names without unique metadata stay separate. Never let array
+      // order decide which RAW inherits a JPEG's tasks and edits.
+      const raw = exact.length === 1 ? exact[0] : candidates.length === 1 ? candidates[0] : undefined
+      if (raw === undefined) continue
+      usedRaw.add(raw.path)
+      usedRaster.add(raster.path)
+      shots.set(`pair:${raw.path}`, { raw: [raw], raster: [raster] })
+    }
+    looseRaw.push(...e.raw.filter(raw => !usedRaw.has(raw.path)))
+    looseRaster.push(...e.raster.filter(raster => !usedRaster.has(raster.path)))
   }
   // Cross-directory pairing (e.g. RAW/ and JPG/ folders): same base name, same capture second, same camera.
-  const rawIndex = new Map<string, FileRecord>()
+  const rawIndex = new Map<string, FileRecord[]>()
   for (const r of looseRaw) {
     if (r.meta.captureTime === undefined) continue
-    rawIndex.set(`${r.base.toLowerCase()}|${r.meta.captureTime.slice(0, 19)}|${r.meta.camera ?? ''}`, r)
+    const key = `${r.base.toLowerCase()}|${r.meta.captureTime.slice(0, 19)}|${r.meta.camera ?? ''}`
+    rawIndex.set(key, [...rawIndex.get(key) ?? [], r])
   }
   const pairedRaw = new Set<string>()
   for (const j of looseRaster) {
     const key = j.meta.captureTime === undefined ? undefined : `${j.base.toLowerCase()}|${j.meta.captureTime.slice(0, 19)}|${j.meta.camera ?? ''}`
-    const r = key === undefined ? undefined : rawIndex.get(key)
-    if (r !== undefined && !pairedRaw.has(r.path)) {
+    const candidates = (key === undefined ? [] : rawIndex.get(key) ?? []).filter(raw => !pairedRaw.has(raw.path) && compatiblePair(raw, j))
+    const r = candidates.length === 1 ? candidates[0] : undefined
+    if (r !== undefined) {
       pairedRaw.add(r.path)
       shots.set(`pair:${r.path}`, { raw: [r], raster: [j] })
     } else {
@@ -272,6 +323,7 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
 
   let pairs = 0
   const shotIds = new Set<string>()
+  const taskShotIds = new Set(repo.tasks().map(t => t.shotId))
   // When mixing phone photos (with OffsetTimeOriginal) and camera photos (without timezone offset)
   // in the same workspace, infer the workspace/day timezone offset so camera timestamps are not
   // misinterpreted as UTC 'Z' (which would shift them by e.g. 8 hours and break scene/segment grouping).
@@ -285,22 +337,43 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       if (d !== null && !tzByDay.has(d)) tzByDay.set(d, tz)
     }
   }
+  type ShotFiles = { raw: FileRecord[]; raster: FileRecord[] }
+  const writeGroups: ShotFiles[] = []
+  for (const e of shots.values()) {
+    const members = [...e.raw, ...e.raster]
+    const prior = new Set(members.flatMap(f => previousShotByFile.get(f.id) ?? []))
+    const taskBound = [...prior].filter(id => taskShotIds.has(id))
+    if (taskBound.length > 1) {
+      // Never merge two independently edited shots as a side effect of pairing.
+      for (const f of members) writeGroups.push(f.kind === 'raw' ? { raw: [f], raster: [] } : { raw: [], raster: [f] })
+    } else writeGroups.push(e)
+  }
+  let removedFiles = 0
   repo.db.tx(() => {
-    for (const e of shots.values()) {
+    for (const e of writeGroups) {
+      e.raw.sort((a, b) => a.path.localeCompare(b.path))
       // Prefer a JPEG as the display raster when several rasters share a base name.
-      e.raster.sort((a, b) => (a.format === 'jpg' ? 0 : 1) - (b.format === 'jpg' ? 0 : 1))
+      e.raster.sort((a, b) => ((a.format === 'jpg' ? 0 : 1) - (b.format === 'jpg' ? 0 : 1)) || a.path.localeCompare(b.path))
       const raw = e.raw[0]
       const raster = e.raster[0]
       const primary = (raw ?? raster) as FileRecord
+      const members = [...e.raw, ...e.raster]
       if (raw !== undefined && raster !== undefined) pairs++
-      const id = shotIdFor(primary.path)
+      const prior = [...new Set(members.flatMap(f => previousShotByFile.get(f.id) ?? []))]
+      const taskBound = prior.filter(id => taskShotIds.has(id) && !shotIds.has(id))
+      let id = taskBound[0] ?? prior.find(candidate => !shotIds.has(candidate)) ?? shotIdFor(primary.id)
+      for (let n = 1; shotIds.has(id); n++) id = shotIdFor(`${primary.id}:${n}`)
       shotIds.add(id)
       const metaSrc = primary.meta.captureTime !== undefined ? primary : (raster ?? primary)
       const day = localDay(metaSrc.meta.captureTime)
       const fallbackTz = raster?.meta.tzOffset ?? (day !== null ? tzByDay.get(day) : undefined) ?? workspaceTz
       const prev = repo.shot(id)
+      const sourceVersion = createHash('sha256').update(JSON.stringify(members.map(f => [f.id, f.contentVersion ?? f.sha256, f.meta.orientation ?? null]).sort(([a], [b]) => String(a).localeCompare(String(b))))).digest('hex')
+      const sourceChanged = prev !== undefined && prev.sourceVersion !== sourceVersion
       const shot: Shot = {
         id,
+        status: 'active',
+        sourceVersion,
         primaryFile: primary.id,
         rawFile: raw?.id ?? null,
         rasterFile: raster?.id ?? null,
@@ -315,27 +388,31 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         exposureTime: metaSrc.meta.exposureTime ?? null,
         aperture: metaSrc.meta.aperture ?? null,
         focalLength: metaSrc.meta.focalLength ?? null,
-        width: prev?.width ?? metaSrc.meta.width ?? null,
-        height: prev?.height ?? metaSrc.meta.height ?? null,
+        width: sourceChanged ? (metaSrc.meta.width ?? null) : (prev?.width ?? metaSrc.meta.width ?? null),
+        height: sourceChanged ? (metaSrc.meta.height ?? null) : (prev?.height ?? metaSrc.meta.height ?? null),
         orientation: primary.meta.orientation ?? null,
-        previewPath: prev?.previewPath ?? null,
-        thumbPath: prev?.thumbPath ?? null,
-        previewSource: prev?.previewSource ?? null,
-        previewError: prev?.previewError ?? null,
+        previewPath: sourceChanged ? null : (prev?.previewPath ?? null),
+        thumbPath: sourceChanged ? null : (prev?.thumbPath ?? null),
+        previewSource: sourceChanged ? null : (prev?.previewSource ?? null),
+        previewError: sourceChanged ? 'source changed; rebuild previews and analysis' : (prev?.previewError ?? null),
         userFlag: prev?.userFlag ?? null,
         userRating: prev?.userRating ?? (metaSrc.meta.rating ?? null),
         note: prev?.note ?? null,
         tags: prev?.tags ?? [],
       }
       repo.saveShot(shot)
-      for (const f of [...e.raw, ...e.raster]) {
+      if (sourceChanged) {
+        repo.invalidateShotDerivatives(id)
+        repo.addEvent(null, 'warn', 'source-changed', `source content changed for ${id}; previews, scores and groups invalidated`, { shotId: id })
+      }
+      for (const f of members) {
         f.shotId = id
         repo.saveFile(f)
       }
     }
+    removedFiles = repo.markFilesMissingNotIn(new Set(files.map(f => f.path)))
+    repo.markShotsMissingNotIn(shotIds)
   })
-  const removedFiles = repo.deleteFilesNotIn(new Set(files.map(f => f.path)))
-  repo.deleteShotsNotIn(shotIds)
   return {
     files: files.length,
     shots: shotIds.size,

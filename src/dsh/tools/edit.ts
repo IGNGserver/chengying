@@ -98,12 +98,13 @@ export function engineTools(rt: ChengyingRuntime): ToolDefinition[] {
       async run(args, exec) {
         const e = rt.engines().get(args.engine)
         if (e.callNative === undefined) throw new ChengyingError('unsupported', `${args.engine} has no native tools`)
-        const project = rt.projectOrUndefined(exec.agent?.id)
-        const scratch = project?.path('scratch', 'native') ?? rt.scratchRoot()
+        const project = rt.projectForAgent(exec.agent?.id)
+        if (project === undefined) throw new ChengyingError('permission-denied', 'edit_native requires an agent-bound Chengying project; pass a task-bound tool or open a project in this session')
+        const scratch = project.path('scratch', 'native')
         return await e.callNative(args.tool, args.arguments ?? {}, {
           scratchDir: scratch,
-          readable: (p: string) => (project === undefined ? p : project.guard.readable(p)),
-          writable: (p: string) => (project === undefined ? p : project.guard.writable(p)),
+          readable: (p: string) => project.guard.readable(p),
+          writable: (p: string) => project.guard.writable(p),
         })
       },
     }),

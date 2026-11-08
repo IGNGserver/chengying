@@ -9,20 +9,33 @@ import type { SelectionSpec } from '../types.ts'
 const CN_DIGITS: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
 
 export function parseChineseNumber(s: string): number | undefined {
-  if (/^\d+$/.test(s)) return Number(s)
+  if (/^\d+$/.test(s)) { const value = Number(s); return Number.isSafeInteger(value) ? value : undefined }
   let total = 0
   let section = 0
   let digit = 0
   let seen = false
+  let sectionUnit = 1000
   for (const ch of s) {
     if (ch in CN_DIGITS) { digit = CN_DIGITS[ch] as number; seen = true; continue }
-    const unit = ch === '十' ? 10 : ch === '百' ? 100 : ch === '千' ? 1000 : ch === '万' ? 10000 : 0
+    const unit = ch === '十' ? 10 : ch === '百' ? 100 : ch === '千' ? 1000 : ch === '万' ? 10_000 : ch === '亿' ? 100_000_000 : 0
     if (unit === 0) return undefined
     seen = true
-    if (unit === 10000) { total = (total + section + digit) * unit; section = 0 } else section += (digit === 0 ? 1 : digit) * unit
+    if (unit < 10_000) {
+      if (unit > sectionUnit || (unit > 10 && digit === 0)) return undefined
+      section += (digit === 0 ? 1 : digit) * unit
+      sectionUnit = unit
+    } else {
+      section += digit
+      if (section === 0) return undefined
+      total += section * unit
+      if (!Number.isSafeInteger(total)) return undefined
+      section = 0
+      sectionUnit = 1000
+    }
     digit = 0
   }
-  return seen ? total + section + digit : undefined
+  const value = total + section + digit
+  return seen && Number.isSafeInteger(value) ? value : undefined
 }
 
 /** Keyword → canonical tag used by scorers (VLM/agent) and selection. */
@@ -49,7 +62,7 @@ export function parseSelectionRequest(text: string): SelectionSpec {
   // Strip non-quantity phrases ("同一张", "每一张", "不要一张", etc.) before matching count.
   const countCleaned = t
     .replace(/(?:同|每|哪|第|最后|任|某|这|那|不|没)\s*一\s*[张幅个]/g, '')
-    .replace(/(?:不要|别留|排除|去掉)\s*[0-9零〇一二两三四五六七八九十百千]+\s*[张幅个]/g, '')
+    .replace(/(?:不要|别留|排除|去掉)\s*[0-9零〇一二两三四五六七八九十千百万亿]+\s*[张幅个]/g, '')
   const count = /(?:选|挑|精选|保留|留|pick|select|choose|keep|top)\s*(?:出|个|上)?\s*([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|个|photos?|images?|pictures?|shots?)?/i.exec(countCleaned)
     ?? /([0-9]+|[零〇一二两三四五六七八九十百千]+)\s*(?:张|幅|photos?|images?|pictures?|shots?)/i.exec(countCleaned)
   const unlimited = /不限|不限制|所有(?:好|优秀|合格)|全部(?:好|优秀|合格)|any number|no limit|all (?:good|great|keepers)/i.test(t)

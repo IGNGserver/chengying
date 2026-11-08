@@ -64,6 +64,7 @@ export class Project {
   readonly features: FeaturePool
   readonly options: ProjectOptions
   private closed = false
+  private readonly extraWritableRoots = new Set<string>()
 
   static open(root: string, options: ProjectOptions = {}): Project {
     const abs = resolve(root)
@@ -81,6 +82,8 @@ export class Project {
     for (const d of ['previews', 'thumbs', 'scratch', 'renders', 'sheets', 'recipes', 'engines']) mkdirSync(join(this.stateDir, d), { recursive: true })
     this.db = new Db(join(this.stateDir, 'chengying.db'))
     this.repo = new Repo(this.db)
+    const persistedExportDir = this.db.getMeta('exportDir')
+    this.exportDir = resolve(options.exportDir ?? (persistedExportDir === undefined || persistedExportDir.trim() === '' ? join(root, '_chengying_export') : persistedExportDir))
     this.integrity = new IntegrityService(this)
     // Upgrade path: a project scanned by an older Chengying already has the
     // scan-time size/mtime in `files`; seed the baseline from that record
@@ -110,7 +113,7 @@ export class Project {
     this.db.setMeta('exportDir', abs)
     this.guard = new FsGuard({
       workspaceRoots: [this.root],
-      writableRoots: [this.stateDir, abs],
+      writableRoots: [this.stateDir, abs, ...this.extraWritableRoots],
       extraReadRoots: this.options.extraReadRoots,
       isOriginal: p => this.repo.isOriginalPath(p),
     })
@@ -121,6 +124,7 @@ export class Project {
     const abs = resolve(dir)
     mkdirSync(abs, { recursive: true })
     this.guard.addWritableRoot(abs)
+    this.extraWritableRoots.add(this.guard.writable(abs))
     return this.guard.writable(abs)
   }
 
@@ -142,7 +146,10 @@ export class Project {
   async scan(opts: { signal?: AbortSignal; onProgress?: ProgressFn } = {}): Promise<ScanResult> {
     const result = await scanWorkspace({
       root: this.root,
-      skipDirs: this.guard.ownedRoots(),
+      // Custom delivery roots may also contain unrelated originals. Traverse
+      // them and exclude only DB-recorded generated artifacts; state/cache and
+      // the conventional _chengying_export directory remain fully internal.
+      skipDirs: [this.stateDir],
       metadata: this.metadata,
       repo: this.repo,
       concurrency: this.options.concurrency ?? 6,
@@ -247,20 +254,35 @@ export class Project {
       const todo = shots.filter(s => opts.force === true || this.repo.scores(s.id)[source] === undefined)
       const res = { scored: 0, failed: 0 } as { scored: number; failed: number; error?: string }
       let done = 0
-      for (const batch of chunk(todo, scorer.batchSize)) {
-        opts.signal?.throwIfAborted()
-        try {
-          const scores = await scorer.score(batch.map(s => s.previewPath as string), opts.signal)
-          batch.forEach((s, i) => { const sc = scores[i]; if (sc !== undefined) { this.repo.saveScore(s.id, source, sc); res.scored++ } })
-        } catch (error) {
-          res.failed += batch.length
-          res.error = errorMessage(error)
-          if (error instanceof ChengyingError && error.code === 'engine-unavailable') break
+      try {
+        for (const batch of chunk(todo, scorer.batchSize)) {
+          opts.signal?.throwIfAborted()
+          try {
+            const scores = await scorer.score(batch.map(s => s.previewPath as string), opts.signal)
+            if (scores.length !== batch.length) throw new ChengyingError('engine-failed', `model ${cfg.id} returned ${scores.length} scores for ${batch.length} images`)
+            const valid = scores.map(score => ['technical', 'aesthetic', 'composition', 'content', 'story', 'potential'].some(key => typeof score[key as keyof typeof score] === 'number' && Number.isFinite(score[key as keyof typeof score])))
+            this.db.tx(() => {
+              batch.forEach((shot, index) => {
+                if (valid[index] === true) this.repo.saveScore(shot.id, source, scores[index]!)
+              })
+            })
+            const count = valid.filter(Boolean).length
+            res.scored += count
+            res.failed += batch.length - count
+            if (count < batch.length) res.error = `${batch.length - count} response(s) contained no finite score dimension`
+          } catch (error) {
+            if (opts.signal?.aborted === true) throw error
+            res.failed += batch.length
+            res.error = errorMessage(error)
+            if (error instanceof ChengyingError && error.code === 'engine-unavailable') break
+          } finally {
+            done += batch.length
+            opts.onProgress?.({ stage: `model:${cfg.id}`, done, total: todo.length })
+          }
         }
-        done += batch.length
-        opts.onProgress?.({ stage: `model:${cfg.id}`, done, total: todo.length })
+      } finally {
+        await scorer.close?.()
       }
-      await scorer.close?.()
       out[cfg.id] = res
     }
     return out

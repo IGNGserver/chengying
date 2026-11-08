@@ -15,7 +15,9 @@ export interface FileRecord {
   size: number
   mtimeMs: number
   sha256: string | null
-  status: 'ok' | 'error'
+  /** Content fingerprint used to invalidate all source-derived artifacts. */
+  contentVersion: string | null
+  status: 'ok' | 'error' | 'missing'
   error: string | null
   meta: PhotoMetadata
 }
@@ -48,6 +50,8 @@ export interface PhotoMetadata {
 
 export interface Shot {
   id: string
+  status: 'active' | 'missing'
+  sourceVersion: string | null
   primaryFile: string           // file id of the best source (RAW when present)
   rawFile: string | null
   rasterFile: string | null
@@ -280,6 +284,21 @@ export interface EditDocument {
   output?: { maxEdge?: number; format?: 'jpeg' | 'tiff' | 'png' | 'webp' | 'avif'; quality?: number; bitDepth?: 8 | 16 }
   /** Provenance flags (generative edits etc.). */
   provenance?: { generative?: boolean; authorizationIds?: string[]; notes?: string[] }
+}
+
+export interface GeneratedAssetReceipt {
+  id: string
+  authorizationId: string
+  taskId: string
+  shotId: string
+  baseRevisionId: string
+  providerId: string
+  assetPath: string
+  assetSha256: string
+  patchAssetPath: string | null
+  patchAssetSha256: string | null
+  detail: Record<string, unknown>
+  createdAt: string
 }
 
 export interface RevisionRecord {

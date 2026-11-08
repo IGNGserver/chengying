@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
@@ -163,10 +163,9 @@ await sharp({ create: { width: m.width, height: m.height, channels: 3, backgroun
   }, 120_000)
 
   it('creates generative layers only with an authorization and tags the export', async () => {
-    // A forged layer without a real authorization is refused at render time.
-    await edit.applyOps(taskB, [{ op: 'add_step', stage: 'ai', step: { op: 'gen_layer', params: { asset: join(state, 'nope.png'), authorization: 'auth_fake' } } }], { author: 'test' })
-    await expect(edit.render(taskB, { maxEdge: 300 })).rejects.toThrow(/no authorization/)
-    edit.undo(taskB, 'test')
+    // Generic edits cannot manufacture a generated layer or its provenance.
+    await expect(edit.applyOps(taskB, [{ op: 'add_step', stage: 'ai', step: { op: 'gen_layer', params: { asset: join(state, 'nope.png'), authorization: 'auth_fake' } } }], { author: 'test' })).rejects.toThrow(/authorized provider flow/)
+    await expect(edit.applyOps(taskB, [{ op: 'set_provenance', generative: true, authorization: 'auth_fake' }], { author: 'test' })).rejects.toThrow(/authorized provider flow/)
 
     const shotId = project.repo.task(taskB)?.shotId as string
     const auth = project.repo.addAuthorization({ scope: 'generative', shotId, taskId: null, grantedBy: 'user (test)', note: '', expiresAt: null, maxUses: 1 })
@@ -174,15 +173,22 @@ await sharp({ create: { width: m.width, height: m.height, channels: 3, backgroun
     const g = await edit.generate(taskB, { provider, kind: 'fill', prompt: 'clear blue sky', mask: { shapes: [{ type: 'rectangle', x: 0, y: 0, w: 0.25, h: 0.25 }] }, authorizationId: auth, author: 'test', maxEdge: 800 })
     expect(g.revision.doc.provenance?.generative).toBe(true)
     expect(g.revision.doc.provenance?.authorizationIds).toContain(auth)
+    expect(project.repo.generatedAsset(g.receiptId)?.baseRevisionId).toBeDefined()
+    const assetBytes = readFileSync(g.asset)
+    // Receipts, not the grant's current state, keep legitimate history usable.
+    project.repo.revokeAuthorization(auth)
     const out = await edit.render(taskB, { maxEdge: 800, format: 'png' })
     const px = await sharp(out.path).raw().toBuffer({ resolveWithObject: true })
     const at = (fx: number, fy: number): number[] => { const i = (Math.floor(fy * px.info.height) * px.info.width + Math.floor(fx * px.info.width)) * px.info.channels; return [px.data[i] as number, px.data[i + 1] as number, px.data[i + 2] as number] }
     expect(at(0.1, 0.1)[0]).toBeGreaterThan(200)
     expect(at(0.1, 0.1)[1]).toBeLessThan(60)
     expect(at(0.7, 0.7)[1]).toBeGreaterThan(at(0.1, 0.1)[1] as number) // outside the mask: the photo
+    writeFileSync(g.asset, 'unauthorized replacement')
+    await expect(edit.render(taskB, { maxEdge: 300, format: 'png' })).rejects.toThrow(/content hash changed/)
+    writeFileSync(g.asset, assetBytes)
 
     const ex = await exportPhotos(project, edit, { taskIds: [taskA, taskB], subdir: 'ai1', maxEdge: 1200 })
-    expect(ex.exported).toBe(2)
+    expect(ex.exported, JSON.stringify(ex.items)).toBe(2)
     expect(ex.verifiedAll).toBe(true)
     const gen = ex.items.find(i => i.taskId === taskB)
     const plain = ex.items.find(i => i.taskId === taskA)

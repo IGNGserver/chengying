@@ -5,7 +5,7 @@
  * generative-edit authorizations and model usage.
  */
 import * as React from 'react'
-import { api, imageUrl, renderUrl, type Activity, type EventInfo, type GroupInfo, type RevisionInfo, type SelectionInfo, type ShotRow, type Summary, type TaskInfo } from './api.ts'
+import { api, exportUrl, imageUrl, renderUrl, type Activity, type EventInfo, type GroupInfo, type RevisionInfo, type SelectionInfo, type ShotRow, type Summary, type TaskInfo } from './api.ts'
 import { STYLES } from './styles.ts'
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React
@@ -28,7 +28,7 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: '生成式修改授权', grant: '授权生成式修改', grantScope: '本工作区 24 小时内最多 10 次', grantConfirm: '允许 AI 对本工作区的照片做生成式修改（会产生非拍摄所得的像素，导出时会标注）？', revoke: '撤销', authNote: '生成式修改会改变照片真实性，只在你明确授权后执行。',
     groups: '分组', duplicates: '近似重复组', scenes: '场景', segments: '行程段落', detail: '详情', close: '关闭', error: '错误',
     runCull: '自动筛图（扫描·预览·评分·分组）', rerunCull: '强制重算', lang: 'EN', emptyTasks: '暂无修图任务。在对话中让 Agent 对选片创建修图任务（edit_tasks_create）。', emptyExports: '暂无导出。',
-    minScore: '最低分', viewMode: '视图', gridView: '全部照片', nearGroups: '近似重复/连拍组对比', sceneGroups: '同场景组对比', zoom: '放大对比', estCost: '估算费用', avgDuration: '平均耗时', unchanged: '原片直出',
+    minScore: '最低分', viewMode: '视图', gridView: '全部照片', nearGroups: '近似重复/连拍组对比', sceneGroups: '同场景组对比', zoom: '放大对比', estCost: 'Token 用量（以提供商账单为准）', avgDuration: '平均耗时', unchanged: '原片直出',
     plan: '当前会话计划', goal: '范围', retouchMode: '修图方式', cullQuality: '筛图质量', outputDir: '交付目录', deliverMode: '交付物', stage: '阶段', checkpoint: '选片确认', approveSelection: '确认选片（允许修图）', approved: '已确认选片', cacheRead: '缓存命中',
   },
   en: {
@@ -45,26 +45,35 @@ const T: Record<Lang, Record<string, string>> = {
     authorizations: 'Generative-edit authorizations', grant: 'Authorize generative edits', grantScope: 'this workspace, 24 h, up to 10 edits', grantConfirm: 'Allow AI to make generative edits to photos of this workspace (pixels not captured by the camera; exports are labelled)?', revoke: 'Revoke', authNote: 'Generative edits change photo authenticity and run only with your explicit authorization.',
     groups: 'Groups', duplicates: 'Near-duplicate groups', scenes: 'Scenes', segments: 'Trip segments', detail: 'Detail', close: 'Close', error: 'Error',
     runCull: 'Run culling (scan · previews · scores · groups)', rerunCull: 'Recompute', lang: '中', emptyTasks: 'No retouch tasks yet. Ask the agent to create them for a selection (edit_tasks_create).', emptyExports: 'No exports yet.',
-    minScore: 'Min score', viewMode: 'View', gridView: 'All photos', nearGroups: 'Near-duplicate bursts', sceneGroups: 'Scene groups', zoom: 'Fullscreen compare', estCost: 'Est. cost', avgDuration: 'Avg time', unchanged: 'Unchanged',
+    minScore: 'Min score', viewMode: 'View', gridView: 'All photos', nearGroups: 'Near-duplicate bursts', sceneGroups: 'Scene groups', zoom: 'Fullscreen compare', estCost: 'Token usage (see provider invoice)', avgDuration: 'Avg time', unchanged: 'Unchanged',
     plan: 'Session plan', goal: 'Goal', retouchMode: 'Retouch', cullQuality: 'Cull quality', outputDir: 'Delivery directory', deliverMode: 'Deliverable', stage: 'Stage', checkpoint: 'Selection checkpoint', approveSelection: 'Approve selection', approved: 'Selection approved', cacheRead: 'Cache read',
   },
 }
 
-function usePoll<V>(fn: () => Promise<V>, deps: unknown[], intervalMs = 4000): { data: V | undefined; error: string | undefined; reload: () => void } {
-  const [data, setData] = useState<V>()
-  const [error, setError] = useState<string>()
+function usePoll<V>(fn: (signal: AbortSignal) => Promise<V>, deps: unknown[], intervalMs = 4000): { data: V | undefined; error: string | undefined; loading: boolean; reload: () => void } {
+  const [state, setState] = useState<{ data?: V; error?: string; loading: boolean }>({ loading: true })
   const [tick, setTick] = useState(0)
+  const fnRef = useRef(fn)
+  fnRef.current = fn
   useEffect(() => {
-    let alive = true
-    const run = (): void => {
-      fn().then(v => { if (alive) { setData(v); setError(undefined) } }, (e: Error) => { if (alive) setError(e.message) })
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    setState({ loading: true })
+    const run = async (): Promise<void> => {
+      try {
+        const data = await fnRef.current(controller.signal)
+        if (!controller.signal.aborted) setState({ data, loading: false })
+      } catch (error) {
+        if (!controller.signal.aborted) setState({ error: error instanceof Error ? error.message : String(error), loading: false })
+      } finally {
+        if (!controller.signal.aborted && intervalMs > 0) timer = setTimeout(() => { if (document.visibilityState === 'visible') void run(); else timer = setTimeout(() => { void run() }, intervalMs) }, intervalMs)
+      }
     }
-    run()
-    const t = setInterval(() => { if (document.visibilityState === 'visible') run() }, intervalMs)
-    return () => { alive = false; clearInterval(t) }
+    void run()
+    return () => { controller.abort(new Error('superseded')); if (timer !== undefined) clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick])
-  return { data, error, reload: useCallback(() => setTick(x => x + 1), []) }
+  }, [...deps, tick, intervalMs])
+  return { data: state.data, error: state.error, loading: state.loading, reload: useCallback(() => setTick(x => x + 1), []) }
 }
 
 const fmt = (v: number | undefined): string => (v === undefined || v === null ? '–' : String(Math.round(v)))
@@ -90,20 +99,23 @@ export function App(): React.ReactElement {
   const [project, setProject] = useState<string>()
   const [path, setPath] = useState('')
   const [msg, setMsg] = useState<string>()
-  const projects = usePoll(() => api<{ projects: Summary[]; recent: Array<{ id: string; root: string }> }>('/projects'), [], 5000)
-  const activities = usePoll(() => api<{ activities: Activity[] }>('/activities'), [], 2500)
+  const openSeq = useRef(0)
+  const projects = usePoll(signal => api<{ projects: Summary[]; recent: Array<{ id: string; root: string }> }>('/projects', { signal }), [], 5000)
+  const activities = usePoll(signal => api<{ activities: Activity[] }>('/activities', { signal }), [], 2500)
   useEffect(() => {
     if (project === undefined && projects.data?.projects[0] !== undefined) setProject(projects.data.projects[0].projectId)
   }, [projects.data, project])
   const current = projects.data?.projects.find(p => p.projectId === project)
 
   const open = async (target = path): Promise<void> => {
+    const seq = ++openSeq.current
     try {
       const s = await api<Summary>('/projects/open', { method: 'POST', body: { path: target } })
+      if (seq !== openSeq.current) return
       setProject(s.projectId)
       projects.reload()
       setMsg(undefined)
-    } catch (e) { setMsg((e as Error).message) }
+    } catch (e) { if (seq === openSeq.current) setMsg((e as Error).message) }
   }
 
   const running = (activities.data?.activities ?? []).filter(a => a.state === 'running' && (project === undefined || a.projectId === project))
@@ -117,7 +129,7 @@ export function App(): React.ReactElement {
           const v = e.target.value
           const recent = projects.data?.recent.find(r => `recent:${r.id}` === v)
           if (recent !== undefined) void open(recent.root)
-          else setProject(v || undefined)
+          else { openSeq.current++; setProject(v || undefined) }
         }}>
           {(projects.data?.projects ?? []).map(p => <option key={p.projectId} value={p.projectId}>{p.root.split(/[\\/]/).slice(-2).join('/')}</option>)}
           {(projects.data?.recent ?? []).map(r => <option key={r.id} value={`recent:${r.id}`}>↺ {r.root.split(/[\\/]/).slice(-2).join('/')}</option>)}
@@ -128,7 +140,7 @@ export function App(): React.ReactElement {
         <input className="cy-input" placeholder={t.workspacePath} value={path} onChange={e => setPath(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void open() }} />
         <button className="cy-btn" disabled={path.trim() === ''} onClick={() => void open()}>{t.open}</button>
       </div>
-      {msg !== undefined && <div className="cy-error">{msg}</div>}
+      {(msg ?? projects.error ?? activities.error) !== undefined && <div className="cy-error" role="alert">{msg ?? projects.error ?? activities.error}</div>}
       {running.length > 0 && (
         <div className="cy-activities">
           {running.map(a => (
@@ -205,7 +217,7 @@ function Overview({ s, t, activities }: { s: Summary; t: Record<string, string>;
 }
 
 function ShotDetail({ pid, shot, t, onClose, selection }: { pid: string; shot: string; t: Record<string, string>; onClose: () => void; selection?: string }): React.ReactElement {
-  const d = usePoll(() => api<ShotRow & { scoresBySource: Record<string, Record<string, unknown>>; groups: Array<{ id: string; kind: string; label: string; size: number }>; detail?: { reasons?: Record<string, string> } }>(`/p/${pid}/shot/${shot}`), [pid, shot], 15000)
+  const d = usePoll(signal => api<ShotRow & { scoresBySource: Record<string, Record<string, unknown>>; groups: Array<{ id: string; kind: string; label: string; size: number }>; detail?: { reasons?: Record<string, string> } }>(`/p/${pid}/shot/${shot}`, { signal }), [pid, shot], 15000)
   const flag = async (f: 'pick' | 'reject' | null): Promise<void> => { await api(`/p/${pid}/flag`, { method: 'POST', body: { shots: [shot], flag: f } }); d.reload() }
   const add = async (): Promise<void> => { if (selection) await api(`/p/${pid}/selection/${selection}/adjust`, { method: 'POST', body: { add: [shot] } }) }
   const x = d.data
@@ -213,6 +225,7 @@ function ShotDetail({ pid, shot, t, onClose, selection }: { pid: string; shot: s
     <div className="cy-drawer">
       <div className="cy-row"><b>{shot}</b><button className="cy-link" onClick={onClose}>{t.close}</button></div>
       <img className="cy-preview" src={imageUrl(pid, shot, 'preview')} alt={shot} />
+      {d.error !== undefined && <div className="cy-error" role="alert">{d.error}</div>}
       {x !== undefined && <>
         <div className="cy-small cy-muted">{x.time?.replace('T', ' ')} · {x.camera} {x.raw ? '· RAW' : ''}</div>
         {x.caption && <div className="cy-small">{x.caption}</div>}
@@ -240,10 +253,15 @@ function Photos({ pid, t }: { pid: string; t: Record<string, string> }): React.R
   const [minScore, setMinScore] = useState(0)
   const [groupMode, setGroupMode] = useState<'' | 'near' | 'scene'>('')
   const [detail, setDetail] = useState<string>()
-  const [limit, setLimit] = useState(120)
-  const sels = usePoll(() => api<{ selections: SelectionInfo[] }>(`/p/${pid}/selections`), [pid], 10000)
-  const rows = usePoll(() => api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?sort=${sort}&limit=${limit}${issue ? `&issue=${issue}` : ''}${minScore > 0 ? `&min_score=${minScore}` : ''}`), [pid, sort, issue, minScore, limit], 8000)
-  const groups = usePoll(() => groupMode === '' ? Promise.resolve({ groups: [] as GroupInfo[] }) : api<{ groups: GroupInfo[] }>(`/p/${pid}/groups?kind=${groupMode}`), [pid, groupMode], 8000)
+  const [page, setPage] = useState(1)
+  const pageSize = 60
+  const sels = usePoll(signal => api<{ selections: SelectionInfo[] }>(`/p/${pid}/selections`, { signal }), [pid], 10000)
+  const rows = usePoll(signal => api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?sort=${sort}&limit=${pageSize}&offset=${(page - 1) * pageSize}${issue ? `&issue=${issue}` : ''}${minScore > 0 ? `&min_score=${minScore}` : ''}`, { signal }), [pid, sort, issue, minScore, page, pageSize], 8000)
+  const groups = usePoll(signal => groupMode === '' ? Promise.resolve({ groups: [] as GroupInfo[] }) : api<{ groups: GroupInfo[] }>(`/p/${pid}/groups?kind=${groupMode}`, { signal }), [pid, groupMode], 8000)
+  const total = rows.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  useEffect(() => { setPage(1); setDetail(undefined) }, [pid, sort, issue, minScore, groupMode])
+  useEffect(() => { setPage(value => Math.min(value, totalPages)) }, [totalPages])
   const latest = sels.data?.selections[0]?.id
   const shotById = useMemo(() => new Map((rows.data?.shots ?? []).map(s => [s.id, s])), [rows.data])
   const quickFlag = async (shotId: string, f: 'pick' | 'reject'): Promise<void> => {
@@ -268,6 +286,7 @@ function Photos({ pid, t }: { pid: string; t: Record<string, string> }): React.R
         <label title={`${t.minScore}: ${minScore}`}>{t.minScore} <input className="cy-range" type="range" min={0} max={90} step={5} value={minScore} onChange={e => setMinScore(Number(e.target.value))} /><span className="cy-small cy-muted">{minScore > 0 ? `≥${minScore}` : t.all}</span></label>
         <span className="cy-muted">{rows.data?.total ?? 0}</span>
       </div>
+      {(rows.error ?? groups.error ?? sels.error) !== undefined && <div className="cy-error" role="alert">{rows.error ?? groups.error ?? sels.error}</div>}
       {groupMode !== '' ? (
         <div>
           {(groups.data?.groups ?? []).filter(g => g.size >= (groupMode === 'near' ? 2 : 1)).map(g => (
@@ -304,27 +323,33 @@ function Photos({ pid, t }: { pid: string; t: Record<string, string> }): React.R
           ))}
         </div>
       )}
-      {groupMode === '' && (rows.data?.total ?? 0) > limit && <button className="cy-btn cy-ghost" onClick={() => setLimit(limit + 120)}>+120</button>}
+      {groupMode === '' && totalPages > 1 && <div className="cy-row">
+        <button className="cy-btn cy-ghost" disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))}>←</button>
+        <input className="cy-input" style={{ width: 64 }} type="number" min={1} max={totalPages} value={page} onChange={event => setPage(Math.max(1, Math.min(totalPages, Number(event.target.value) || 1)))} />
+        <span className="cy-muted cy-small">/ {totalPages} · {total} {t.shots}</span>
+        <button className="cy-btn cy-ghost" disabled={page >= totalPages} onClick={() => setPage(value => Math.min(totalPages, value + 1))}>→</button>
+      </div>}
       {detail !== undefined && <ShotDetail pid={pid} shot={detail} t={t} selection={latest} onClose={() => setDetail(undefined)} />}
     </div>
   )
 }
 
 function Selection({ pid, t }: { pid: string; t: Record<string, string> }): React.ReactElement {
-  const sels = usePoll(() => api<{ selections: SelectionInfo[] }>(`/p/${pid}/selections`), [pid], 6000)
+  const sels = usePoll(signal => api<{ selections: SelectionInfo[] }>(`/p/${pid}/selections`, { signal }), [pid], 6000)
   const [sel, setSel] = useState<string>()
+  useEffect(() => { runSeq.current++; setSel(undefined); setDetail(undefined); setApproved(false); setBusy(false) }, [pid])
   const [request, setRequest] = useState('')
   const [busy, setBusy] = useState(false)
+  const runSeq = useRef(0)
   const [approved, setApproved] = useState(false)
   const [err, setErr] = useState<string>()
   const active = sel ?? sels.data?.selections[0]?.id
-  const rows = usePoll(() => active === undefined ? Promise.resolve({ total: 0, shots: [] as ShotRow[] }) : api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?selection=${active}&only=all&limit=500&sort=time`), [pid, active], 6000)
+  const rows = usePoll(signal => active === undefined ? Promise.resolve({ total: 0, shots: [] as ShotRow[] }) : api<{ total: number; shots: ShotRow[] }>(`/p/${pid}/shots?selection=${active}&only=all&limit=500&sort=time`, { signal }), [pid, active], 6000)
   const [detail, setDetail] = useState<string>()
   const items = (rows.data?.shots ?? []).filter(s => s.selection !== undefined).sort((a, b) => Number(b.selection?.included) - Number(a.selection?.included) || (a.selection?.rank ?? 0) - (b.selection?.rank ?? 0))
   const adjust = async (body: Record<string, string[]>): Promise<void> => {
     if (active === undefined) return
-    await api(`/p/${pid}/selection/${active}/adjust`, { method: 'POST', body })
-    rows.reload()
+    await api(`/p/${pid}/selection/${active}/adjust`, { method: 'POST', body }).then(() => rows.reload()).catch((error: Error) => { setErr(error.message) })
   }
   const approve = async (): Promise<void> => {
     try {
@@ -333,11 +358,13 @@ function Selection({ pid, t }: { pid: string; t: Record<string, string> }): Reac
     } catch (e) { setErr((e as Error).message) }
   }
   const run = async (): Promise<void> => {
+    const seq = ++runSeq.current
     setBusy(true); setErr(undefined)
     try {
       const r = await api<{ selectionId: string }>(`/p/${pid}/select`, { method: 'POST', body: { request, base: active } })
+      if (seq !== runSeq.current) return
       setSel(r.selectionId); sels.reload()
-    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+    } catch (e) { if (seq === runSeq.current) setErr((e as Error).message) } finally { if (seq === runSeq.current) setBusy(false) }
   }
   const cur = sels.data?.selections.find(s => s.id === active)
   return (
@@ -347,6 +374,7 @@ function Selection({ pid, t }: { pid: string; t: Record<string, string> }): Reac
         <button className="cy-btn" disabled={busy || request.trim() === ''} onClick={() => void run()}>{t.select}</button>
       </div>
       {err && <div className="cy-error">{err}</div>}
+      {(sels.error ?? rows.error) !== undefined && <div className="cy-error" role="alert">{sels.error ?? rows.error}</div>}
       <div className="cy-toolbar">
         <select className="cy-select" value={active ?? ''} onChange={e => setSel(e.target.value)}>
           {(sels.data?.selections ?? []).map(s => <option key={s.id} value={s.id}>{s.name} · {s.count}</option>)}
@@ -397,14 +425,17 @@ function Compare({ before, after }: { before: string; after: string }): React.Re
 
 function Tasks({ pid, t }: { pid: string; t: Record<string, string> }): React.ReactElement {
   const [status, setStatus] = useState('')
-  const list = usePoll(() => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks${status ? `?status=${status}` : ''}`).catch(() => ({ tasks: [] as TaskInfo[] })), [pid, status], 3000)
+  const list = usePoll(signal => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks${status ? `?status=${status}` : ''}`, { signal }), [pid, status], 3000)
   const [open, setOpen] = useState<string>()
+  const [actionError, setActionError] = useState<string>()
+  useEffect(() => { setOpen(undefined); setActionError(undefined) }, [pid])
   const tasks = list.data?.tasks ?? []
   const counts = useMemo(() => tasks.reduce<Record<string, number>>((a, x) => { a[x.status] = (a[x.status] ?? 0) + 1; return a }, {}), [tasks])
-  const control = async (id: string, action: string): Promise<void> => { await api(`/p/${pid}/task/${id}/control`, { method: 'POST', body: { action } }); list.reload() }
-  if (tasks.length === 0 && status === '') return <div className="cy-empty">{t.emptyTasks}</div>
+  const control = async (id: string, action: string): Promise<void> => { await api(`/p/${pid}/task/${id}/control`, { method: 'POST', body: { action } }).then(() => list.reload()).catch((error: Error) => { setActionError(error.message) }) }
+  if (tasks.length === 0 && status === '' && list.error === undefined) return <div className="cy-empty">{t.emptyTasks}</div>
   return (
     <div>
+      {(list.error ?? actionError) !== undefined && <div className="cy-error" role="alert">{list.error ?? actionError}</div>}
       <div className="cy-toolbar">
         <select className="cy-select" value={status} onChange={e => setStatus(e.target.value)}>
           <option value="">{t.all}</option>
@@ -437,7 +468,7 @@ function Tasks({ pid, t }: { pid: string; t: Record<string, string> }): React.Re
 }
 
 function TaskDetail({ pid, id, t, onClose }: { pid: string; id: string; t: Record<string, string>; onClose: () => void }): React.ReactElement {
-  const d = usePoll(() => api<{ task: TaskInfo; revisions: RevisionInfo[]; events: EventInfo[] }>(`/p/${pid}/task/${id}`), [pid, id], 3000)
+  const d = usePoll(signal => api<{ task: TaskInfo; revisions: RevisionInfo[]; events: EventInfo[] }>(`/p/${pid}/task/${id}`, { signal }), [pid, id], 3000)
   const [rev, setRev] = useState<string>()
   const [zoom, setZoom] = useState(false)
   const task = d.data?.task
@@ -452,6 +483,7 @@ function TaskDetail({ pid, id, t, onClose }: { pid: string; id: string; t: Recor
         {hasCompare && <button className="cy-link" onClick={() => setZoom(true)}>{t.zoom}</button>}
         <button className="cy-link" onClick={onClose}>{t.close}</button>
       </div>
+      {d.error !== undefined && <div className="cy-error" role="alert">{d.error}</div>}
       {hasCompare && task !== undefined && shown !== undefined
         ? <Compare before={imageUrl(pid, task.shotId, 'preview')} after={renderUrl(pid, shown.id)} />
         : task !== undefined && <img className="cy-preview" src={imageUrl(pid, task.shotId, 'preview')} alt="" />}
@@ -489,18 +521,21 @@ function TaskDetail({ pid, id, t, onClose }: { pid: string; id: string; t: Recor
 }
 
 function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.ReactElement {
-  const ex = usePoll(() => api<{ exports: Array<{ id: string; shotId: string; path: string; format: string; verified: boolean; verify: { mismatched?: unknown[]; missing?: string[] } | null; recipePath: string | null; createdAt: string }> }>(`/p/${pid}/exports`), [pid], 6000)
-  const auth = usePoll(() => api<{ authorizations: Array<{ id: string; scope: string; shotId: string | null; note: string; createdAt: string; revoked: boolean; uses: number; maxUses: number | null }> }>(`/p/${pid}/authorizations`).catch(() => ({ authorizations: [] })), [pid], 8000)
+  const ex = usePoll(signal => api<{ exports: Array<{ id: string; shotId: string; path: string; format: string; verified: boolean; verify: { mismatched?: unknown[]; missing?: string[] } | null; recipePath: string | null; createdAt: string }> }>(`/p/${pid}/exports`, { signal }), [pid], 6000)
+  const auth = usePoll(signal => api<{ authorizations: Array<{ id: string; scope: string; shotId: string | null; note: string; createdAt: string; revoked: boolean; uses: number; maxUses: number | null }> }>(`/p/${pid}/authorizations`, { signal }), [pid], 8000)
   const list = ex.data?.exports ?? []
+  const [actionError, setActionError] = useState<string>()
+  useEffect(() => { setActionError(undefined) }, [pid])
   return (
     <div>
+      {(ex.error ?? auth.error ?? actionError) !== undefined && <div className="cy-error" role="alert">{ex.error ?? auth.error ?? actionError}</div>}
       {list.length === 0 ? <div className="cy-empty">{t.emptyExports}</div> : (
         <div className="cy-list">
           {list.map(e => (
             <div key={e.id} className="cy-item">
               <img src={imageUrl(pid, e.shotId, 'thumb')} alt="" />
               <div className="cy-item-body">
-                <div className="cy-small cy-ellipsis" title={e.path}>{e.path}</div>
+                <div className="cy-small cy-ellipsis" title={e.path}><a href={exportUrl(pid, e.id)} download>{e.path}</a></div>
                 <div className={e.verified ? 'cy-ok cy-small' : 'cy-error cy-small'}>{e.verified ? t.verified : `${t.notVerified}: ${JSON.stringify(e.verify?.mismatched ?? e.verify?.missing ?? '')}`}</div>
                 {e.recipePath && <div className="cy-small cy-muted cy-ellipsis" title={e.recipePath}>{e.recipePath}</div>}
               </div>
@@ -513,14 +548,14 @@ function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.
       <div className="cy-row cy-small">
         <button className="cy-btn" onClick={() => {
           if (!window.confirm(t.grantConfirm)) return
-          void api(`/p/${pid}/authorizations`, { method: 'POST', body: { hours: 24, maxUses: 10, note: 'web panel' } }).then(() => auth.reload())
+          void api(`/p/${pid}/authorizations`, { method: 'POST', body: { hours: 24, maxUses: 10, note: 'web panel' } }).then(() => auth.reload()).catch((error: Error) => { setActionError(error.message) })
         }}>{t.grant}</button>
         <span className="cy-muted">{t.grantScope}</span>
       </div>
       {(auth.data?.authorizations ?? []).map(a => (
         <div key={a.id} className={`cy-row cy-small${a.revoked ? ' cy-dim' : ''}`}>
           <span>{a.scope}</span><span className="cy-muted">{a.shotId ?? '*'} · {a.note} · {a.uses}/{a.maxUses ?? '∞'}</span>
-          {!a.revoked && <button className="cy-link" onClick={() => void api(`/p/${pid}/authorizations/${a.id}/revoke`, { method: 'POST' }).then(() => auth.reload())}>{t.revoke}</button>}
+          {!a.revoked && <button className="cy-link" onClick={() => void api(`/p/${pid}/authorizations/${a.id}/revoke`, { method: 'POST' }).then(() => auth.reload()).catch((error: Error) => { setActionError(error.message) })}>{t.revoke}</button>}
         </div>
       ))}
     </div>
@@ -528,11 +563,10 @@ function Exports({ pid, t }: { pid: string; t: Record<string, string> }): React.
 }
 
 function Logs({ pid, s, t }: { pid: string; s: Summary; t: Record<string, string> }): React.ReactElement {
-  const ev = usePoll(() => api<{ events: EventInfo[] }>(`/p/${pid}/events?limit=300`), [pid], 4000)
-  const tasks = usePoll(() => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks`).catch(() => ({ tasks: [] as TaskInfo[] })), [pid], 6000)
+  const ev = usePoll(signal => api<{ events: EventInfo[] }>(`/p/${pid}/events?limit=300`, { signal }), [pid], 4000)
+  const tasks = usePoll(signal => api<{ tasks: TaskInfo[] }>(`/p/${pid}/tasks`, { signal }), [pid], 6000)
   const totals = s.usage.reduce((a, u) => ({ calls: a.calls + u.calls, i: a.i + u.inputTokens, o: a.o + u.outputTokens, cr: a.cr + (u.cacheReadTokens ?? 0), im: a.im + u.images }), { calls: 0, i: 0, o: 0, cr: 0, im: 0 })
   const billableIn = Math.max(0, totals.i - totals.cr)
-  const estUsd = ((billableIn * 1.0 + totals.cr * 0.1 + totals.o * 4.0) / 1_000_000).toFixed(4)
   const durations = (tasks.data?.tasks ?? [])
     .filter(x => x.startedAt && x.finishedAt)
     .map(x => Math.max(0, (Date.parse(x.finishedAt as string) - Date.parse(x.startedAt as string)) / 1000))
@@ -540,8 +574,9 @@ function Logs({ pid, s, t }: { pid: string; s: Summary; t: Record<string, string
   return (
     <div>
       <h4>{t.usage}</h4>
+      {(ev.error ?? tasks.error) !== undefined && <div className="cy-error" role="alert">{ev.error ?? tasks.error}</div>}
       <div className="cy-small cy-muted" style={{ marginBottom: 6 }}>
-        {t.estCost}: ~${estUsd} ({t.cacheRead}: {totals.cr}) · {t.avgDuration}: {avgSec}s ({durations.length})
+        {t.estCost}: – ({t.cacheRead}: {totals.cr}; billable input {billableIn}) · {t.avgDuration}: {avgSec}s ({durations.length})
       </div>
       <table className="cy-table">
         <thead><tr><th /><th>{t.calls}</th><th>{t.tokensIn}</th><th>{t.tokensOut}</th><th>{t.images}</th></tr></thead>

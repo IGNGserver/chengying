@@ -45,6 +45,17 @@ tool-subagent-list-agents (@deepseek-ai/dsh-tool-subagent-control/list-agents): 
 - 看启动日志里有没有 `dsh: disabling profile plugin row "chengying-agent": …`：这是兼容性预检把行禁掉了，原因通常是插件声明的 `engines.dsh` / peer 范围与运行时不符。
 - 又用了 `--patch` 又装了 bundle 时，`mode: auto` 的判定可能落到 `host`（只挂面板不挂工具）；需要一次性全挂就显式 `mode: both`。
 
+## 自定义 Web API 前缀
+
+默认客户端请求同源 `/api/chengying`。修改 `ui.basePath` 只会移动 Host 路由，**不会自动修改 DSH 的 HTML 或客户端 bundle**；自定义 Web 壳还必须在 `lib/client.js` 执行前注入以下任意一种同源配置：
+
+```html
+<meta name="chengying-api-base" content="/plugins/chengying/api">
+<script>globalThis.__CHENGYING_API_BASE__ = '/plugins/chengying/api'</script>
+```
+
+全局值优先于 `meta`，末尾 `/` 会自动去掉。当前客户端不保存跨源凭据，因此不要把它设为另一域名；跨源部署需要宿主反向代理到同一源。注入缺失时面板会显示 HTTP 请求错误，而不是静默回退到另一项目。
+
 ## 取证
 
 | 场景 | 位置 |

@@ -3,6 +3,8 @@
  * here so deployments change behaviour without code edits.
  */
 import Schema from '@deepseek-ai/schemastery'
+import { validateModelConfig } from '../core/analysis/models.ts'
+import { ChengyingError } from '../core/util/errors.ts'
 import type { ModelConfig } from '../core/analysis/models.ts'
 import type { GenerativeProvider } from '../core/edit/generative.ts'
 import type { AiCommandOp } from '../core/edit/engines/ai/index.ts'
@@ -126,7 +128,56 @@ export const Config: Schema<Config> = Schema.object({
   }),
 })
 
+/** Validate fields whose generic schemas cannot express operational constraints. */
+export function validateConfig(config: Config): Config {
+  const integer = (value: number, name: string, minimum = 1): void => {
+    if (!Number.isSafeInteger(value) || value < minimum) throw new ChengyingError('invalid-argument', `${name} must be an integer >= ${minimum}`)
+  }
+  integer(config.previewEdge, 'previewEdge'); integer(config.analysisConcurrency, 'analysisConcurrency'); integer(config.backgroundThreshold, 'backgroundThreshold', 0)
+  integer(config.intake.maxFiles, 'intake.maxFiles'); integer(config.intake.maxBytes, 'intake.maxBytes')
+  integer(config.vlm.batchSize, 'vlm.batchSize'); integer(config.vlm.cell, 'vlm.cell'); integer(config.vlm.maxShots, 'vlm.maxShots'); integer(config.vlm.maxTokens, 'vlm.maxTokens')
+  integer(config.editing.maxConcurrent, 'editing.maxConcurrent'); integer(config.editing.maxAttempts, 'editing.maxAttempts'); integer(config.editing.maxRevisionsPerTask, 'editing.maxRevisionsPerTask'); integer(config.editing.maxTokensPerTask, 'editing.maxTokensPerTask', 0); integer(config.editing.previewEdge, 'editing.previewEdge')
+  const dirName = config.intake.dirName
+  if (dirName.length === 0 || dirName.length > 255 || dirName === '.' || dirName === '..' || /[\\/\0]/.test(dirName)) throw new ChengyingError('invalid-argument', 'intake.dirName must be one safe path segment')
+  const basePath = config.ui.basePath.replace(/\/+$/, '')
+  if (!basePath.startsWith('/') || basePath === '' || /[?#\0]/.test(basePath) || basePath.split('/').some(part => part === '.' || part === '..')) throw new ChengyingError('invalid-argument', 'ui.basePath must be an absolute URL path without query, fragment or traversal')
+  config.ui.basePath = basePath
+  const ids = new Set<string>()
+  for (const model of config.models) { validateModelConfig(model); if (ids.has(model.id)) throw new ChengyingError('invalid-argument', `duplicate scoring model ${model.id}`); ids.add(model.id) }
+  ids.clear()
+  for (const operation of config.aiOperations) {
+    if (!/^[a-z][a-z0-9_]*$/.test(operation.id) || operation.id.startsWith('gen_') || ids.has(operation.id)) throw new ChengyingError('invalid-argument', `invalid or duplicate AI operation id ${operation.id}`)
+    ids.add(operation.id)
+    if (typeof operation.command !== 'string' || operation.command.trim() === '' || !Array.isArray(operation.args)) throw new ChengyingError('invalid-argument', `AI operation ${operation.id} needs command and args`)
+    const args = operation.args.join('\n')
+    if (!args.includes('{input}') || !args.includes('{output}')) throw new ChengyingError('invalid-argument', `AI operation ${operation.id} args must include {input} and {output}`)
+    if (operation.timeoutMs !== undefined) integer(operation.timeoutMs, `aiOperations.${operation.id}.timeoutMs`)
+    if (operation.scaleParam !== undefined && operation.params?.properties?.[operation.scaleParam] === undefined) throw new ChengyingError('invalid-argument', `AI operation ${operation.id} has an unknown scaleParam`)
+  }
+  ids.clear()
+  for (const provider of config.generative.providers) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(provider.id) || ids.has(provider.id)) throw new ChengyingError('invalid-argument', `invalid or duplicate generative provider ${provider.id}`)
+    ids.add(provider.id)
+    if (provider.timeoutMs !== undefined) integer(provider.timeoutMs, `generative.${provider.id}.timeoutMs`)
+    if (provider.type === 'command') {
+      if (provider.command === undefined || provider.command.trim() === '') throw new ChengyingError('invalid-argument', `generative provider ${provider.id} needs a command`)
+      if (!(provider.args ?? ['{input}', '{mask}', '{output}', '{prompt}']).join('\n').includes('{output}')) throw new ChengyingError('invalid-argument', `generative provider ${provider.id} args must include {output}`)
+    } else if (provider.type === 'comfyui') {
+      if (provider.workflow === undefined || provider.workflow === '') throw new ChengyingError('invalid-argument', `ComfyUI provider ${provider.id} needs a workflow`)
+    } else if (provider.type !== 'openai-images') throw new ChengyingError('invalid-argument', `unknown generative provider type ${provider.type as string}`)
+    if (provider.url !== undefined) {
+      let url: URL
+      try { url = new URL(provider.url) } catch { throw new ChengyingError('invalid-argument', `provider ${provider.id} has an invalid URL`) }
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new ChengyingError('invalid-argument', `provider ${provider.id} URL must use HTTP(S)`)
+    }
+  }
+  if (config.superResolution.timeoutMs !== undefined) integer(config.superResolution.timeoutMs, 'superResolution.timeoutMs')
+  const srArgs = config.superResolution.args?.join('\n')
+  if (config.superResolution.args !== undefined && config.superResolution.args.length > 0 && (srArgs === undefined || !srArgs.includes('{input}') || !srArgs.includes('{output}'))) throw new ChengyingError('invalid-argument', 'superResolution.args must include {input} and {output}; {scale} is optional for fixed-scale commands')
+  return config
+}
+
 /** Defaults used when the plugin is driven outside a Loader (tests, CLI). */
 export function resolveConfig(partial: Partial<Config> = {}): Config {
-  return Config(partial as Config) as Config
+  return validateConfig(Config(partial as Config) as Config)
 }

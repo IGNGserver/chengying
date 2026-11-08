@@ -113,9 +113,13 @@ export function computeGroups(input: GroupingInput, opts: GroupingOptions = DEFA
   }
   for (let i = 0; i < byTime.length; i++) {
     const a = byTime[i] as Shot
+    // Undated photos are handled by the LSH pass below; comparing every pair
+    // makes metadata-poor libraries quadratic without adding useful time evidence.
+    if (a.captureTs === null) continue
     for (let j = i + 1; j < byTime.length; j++) {
       const b = byTime[j] as Shot
-      if (a.captureTs !== null && b.captureTs !== null && b.captureTs - a.captureTs > opts.nearWindowSec) break
+      if (b.captureTs === null) continue
+      if (b.captureTs - a.captureTs > opts.nearWindowSec) break
       if (similar(a.id, b.id)) nearUf.union(a.id, b.id)
     }
   }
@@ -157,12 +161,13 @@ export function computeGroups(input: GroupingInput, opts: GroupingOptions = DEFA
   for (const s of byTime) {
     const last = current[current.length - 1]
     if (last === undefined) { current.push(s); continue }
-    const gap = s.captureTs !== null && last.captureTs !== null ? s.captureTs - last.captureTs : 0
+    const gap = s.captureTs !== null && last.captureTs !== null ? s.captureTs - last.captureTs : null
     const fs = features.get(s.id)
     const recent = current.slice(-3).map(x => features.get(x.id)).filter((f): f is Features => f !== undefined)
-    const drift = fs === undefined || recent.length === 0 ? 0 : Math.min(...recent.map(f => visualDistance(f, fs)))
-    const jump = s.gps !== null && last.gps !== null ? haversineKm(s.gps, last.gps) : 0
-    if (gap > opts.sceneGapSec || drift > opts.sceneVisual || jump > opts.sceneGpsKm) flush()
+    const drift = fs === undefined || recent.length === 0 ? null : Math.min(...recent.map(f => visualDistance(f, fs)))
+    const jump = s.gps !== null && last.gps !== null ? haversineKm(s.gps, last.gps) : null
+    const noEvidence = gap === null && drift === null && jump === null
+    if ((gap !== null && gap > opts.sceneGapSec) || (drift !== null && drift > opts.sceneVisual) || (jump !== null && jump > opts.sceneGpsKm) || noEvidence) flush()
     current.push(s)
   }
   flush()
@@ -191,9 +196,12 @@ export function computeGroups(input: GroupingInput, opts: GroupingOptions = DEFA
   for (const s of byTime) {
     const last = segMembers[segMembers.length - 1]
     if (last !== undefined) {
-      const gap = s.captureTs !== null && last.captureTs !== null ? (s.captureTs - last.captureTs) / 60 : 0
-      const jump = s.gps !== null && last.gps !== null ? haversineKm(s.gps, last.gps) : 0
-      if (s.day !== last.day || gap > opts.segmentGapMin || jump > opts.segmentGpsKm) flushSeg()
+      const sameKnownDay = s.day !== null && last.day !== null && s.day === last.day
+      const differentKnownDays = s.day !== null && last.day !== null && s.day !== last.day
+      const gap = s.captureTs !== null && last.captureTs !== null ? (s.captureTs - last.captureTs) / 60 : null
+      const jump = s.gps !== null && last.gps !== null ? haversineKm(s.gps, last.gps) : null
+      const noEvidence = !sameKnownDay && gap === null && jump === null
+      if (differentKnownDays || (gap !== null && gap > opts.segmentGapMin) || (jump !== null && jump > opts.segmentGpsKm) || noEvidence) flushSeg()
     }
     segMembers.push(s)
   }
@@ -203,7 +211,7 @@ export function computeGroups(input: GroupingInput, opts: GroupingOptions = DEFA
   const locBuckets = new Map<string, string[]>()
   const centers: Array<{ key: string; lat: number; lon: number; n: number }> = []
   for (const s of byTime) {
-    if (s.gps === null) continue
+    if (s.gps === null || !Number.isFinite(s.gps.lat) || !Number.isFinite(s.gps.lon) || Math.abs(s.gps.lat) > 90 || Math.abs(s.gps.lon) > 180) continue
     let hit = centers.find(c => haversineKm(c, s.gps as { lat: number; lon: number }) <= opts.locationKm)
     if (hit === undefined) {
       hit = { key: `loc${centers.length}`, lat: s.gps.lat, lon: s.gps.lon, n: 0 }

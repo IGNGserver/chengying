@@ -19,10 +19,12 @@ import { computeFeatures } from './pixels.ts'
 import { aestheticScore, technicalScore } from './scoring.ts'
 import type { ScoreSet } from '../types.ts'
 
+export type ScoreScale = 'auto' | '0-1' | '0-10' | '0-100'
+
 export type ModelConfig =
-  | { id: string; type: 'builtin'; maxEdge?: number; batchSize?: number; dimension?: string }
-  | { id: string; type: 'command'; command: string; args?: string[]; batchSize?: number; timeoutMs?: number; dimension?: string }
-  | { id: string; type: 'http'; url: string; headers?: Record<string, string>; batchSize?: number; timeoutMs?: number; dimension?: string }
+  | { id: string; type: 'builtin'; maxEdge?: number; batchSize?: number; dimension?: string; scale?: ScoreScale }
+  | { id: string; type: 'command'; command: string; args?: string[]; batchSize?: number; timeoutMs?: number; dimension?: string; scale?: ScoreScale }
+  | { id: string; type: 'http'; url: string; headers?: Record<string, string>; batchSize?: number; timeoutMs?: number; dimension?: string; scale?: ScoreScale }
   | {
       id: string
       type: 'onnx'
@@ -45,19 +47,47 @@ export interface ModelScorer {
   close?(): Promise<void>
 }
 
+function normalized(value: number, scale: ScoreScale): number | undefined {
+  if (!Number.isFinite(value) || value < 0) return undefined
+  const maximum = scale === '0-1' ? 1 : scale === '0-10' ? 10 : 100
+  if (value > maximum) return undefined
+  const multiplier = scale === '0-1' ? 100 : scale === '0-10' ? 10 : scale === '0-100' ? 1 : value <= 1 ? 100 : value <= 10 ? 10 : 1
+  return clamp(value * multiplier, 0, 100)
+}
+
 /** Map a raw model answer object onto a ScoreSet. Accepts {score}|{aesthetic,...}|number. */
-export function toScoreSet(raw: unknown, dimension = 'aesthetic'): ScoreSet {
-  if (typeof raw === 'number') return { [dimension]: clamp(raw <= 10 ? raw * 10 : raw, 0, 100), detail: { raw } }
+export function toScoreSet(raw: unknown, dimension = 'aesthetic', scale: ScoreScale = 'auto'): ScoreSet {
+  if (typeof raw === 'number') {
+    const value = normalized(raw, scale)
+    return value === undefined ? { detail: { raw } } : { [dimension]: value, detail: { raw } }
+  }
   if (typeof raw !== 'object' || raw === null) return {}
   const r = raw as Record<string, unknown>
   const out: ScoreSet = { detail: r }
   for (const k of ['technical', 'aesthetic', 'composition', 'content', 'story', 'potential'] as const) {
-    if (typeof r[k] === 'number') out[k] = clamp(r[k] as number, 0, 100)
+    if (typeof r[k] === 'number') out[k] = normalized(r[k] as number, scale)
   }
-  if (typeof r.score === 'number') (out as Record<string, unknown>)[dimension] = clamp((r.score as number) <= 10 ? (r.score as number) * 10 : r.score as number, 0, 100)
+  if (typeof r.score === 'number' && out[dimension as keyof ScoreSet] === undefined) (out as Record<string, unknown>)[dimension] = normalized(r.score as number, scale)
   if (Array.isArray(r.tags)) out.tags = r.tags.map(String)
   if (Array.isArray(r.issues)) out.issues = r.issues.map(String)
   return out
+}
+
+function orderedRows(rows: unknown[], paths: string[], modelId: string): unknown[] {
+  const identified = rows.map(row => typeof row === 'object' && row !== null && 'path' in row)
+  if (identified.some(Boolean)) {
+    if (!identified.every(Boolean)) throw new ChengyingError('engine-failed', `model ${modelId} mixed identified and positional results`)
+    const byPath = new Map<string, unknown>()
+    for (const row of rows) {
+      const path = String((row as { path: unknown }).path)
+      if (byPath.has(path)) throw new ChengyingError('engine-failed', `model ${modelId} returned duplicate path ${path}`)
+      byPath.set(path, row)
+    }
+    if (byPath.size !== paths.length || paths.some(path => !byPath.has(path))) throw new ChengyingError('engine-failed', `model ${modelId} results do not match the requested image paths`)
+    return paths.map(path => byPath.get(path))
+  }
+  if (rows.length !== paths.length) throw new ChengyingError('engine-failed', `model ${modelId} returned ${rows.length} results for ${paths.length} images`)
+  return rows
 }
 
 class CommandScorer implements ModelScorer {
@@ -73,9 +103,8 @@ class CommandScorer implements ModelScorer {
     let rows: unknown[]
     if (text.startsWith('[')) rows = JSON.parse(text) as unknown[]
     else rows = text.split('\n').filter(Boolean).map(l => JSON.parse(l) as unknown)
-    const byPath = new Map<string, unknown>()
-    for (const row of rows) if (typeof row === 'object' && row !== null && 'path' in row) byPath.set(String((row as { path: unknown }).path), row)
-    return paths.map((p, i) => toScoreSet(byPath.get(p) ?? rows[i], this.cfg.dimension))
+    const ordered = orderedRows(rows, paths, this.cfg.id)
+    return paths.map((_, i) => toScoreSet(ordered[i], this.cfg.dimension, this.cfg.scale))
   }
 }
 
@@ -95,7 +124,8 @@ class HttpScorer implements ModelScorer {
     if (!res.ok) throw new ChengyingError('engine-failed', `model ${this.cfg.id} HTTP ${res.status}`)
     const body = await res.json() as unknown
     const rows = Array.isArray(body) ? body : Array.isArray((body as { results?: unknown[] }).results) ? (body as { results: unknown[] }).results : []
-    return paths.map((_, i) => toScoreSet(rows[i], this.cfg.dimension))
+    const ordered = orderedRows(rows, paths, this.cfg.id)
+    return paths.map((_, i) => toScoreSet(ordered[i], this.cfg.dimension, this.cfg.scale))
   }
 }
 
@@ -146,11 +176,13 @@ class OnnxScorer implements ModelScorer {
       const values = Array.from(output?.data ?? [])
       let v: number
       if (this.cfg.head === 'nima') {
-        const sum = values.reduce((a, b) => a + b, 0) || 1
+        if (values.length !== 10 || values.some(value => !Number.isFinite(value) || value < 0) || values.reduce((a, b) => a + b, 0) <= 0) throw new ChengyingError('engine-failed', `model ${this.cfg.id} NIMA head must return 10 finite non-negative weights with positive mass`)
+        const sum = values.reduce((a, b) => a + b, 0)
         v = values.reduce((a, b, i) => a + (i + 1) * b, 0) / sum * 10
       } else {
         const [lo, hi] = this.cfg.range ?? [0, 1]
-        v = ((values[0] ?? 0) - lo) / (hi - lo) * 100
+        if (values.length === 0 || !Number.isFinite(values[0])) throw new ChengyingError('engine-failed', `model ${this.cfg.id} regression head returned no finite value`)
+        v = ((values[0] as number) - lo) / (hi - lo) * 100
       }
       out.push({ [this.cfg.dimension ?? 'aesthetic']: clamp(v, 0, 100), detail: { raw: values.slice(0, 16) } })
     }
@@ -190,7 +222,25 @@ class BuiltinScorer implements ModelScorer {
   }
 }
 
+export function validateModelConfig(cfg: ModelConfig): void {
+  if (cfg.id.trim() === '') throw new ChengyingError('invalid-argument', 'model id must not be empty')
+  if ('batchSize' in cfg && cfg.batchSize !== undefined && (!Number.isInteger(cfg.batchSize) || cfg.batchSize < 1)) throw new ChengyingError('invalid-argument', `model ${cfg.id} batchSize must be a positive integer`)
+  if ('timeoutMs' in cfg && cfg.timeoutMs !== undefined && (!Number.isFinite(cfg.timeoutMs) || cfg.timeoutMs < 1)) throw new ChengyingError('invalid-argument', `model ${cfg.id} timeoutMs must be positive`)
+  if (cfg.type === 'builtin' && cfg.maxEdge !== undefined && (!Number.isInteger(cfg.maxEdge) || cfg.maxEdge < 16)) throw new ChengyingError('invalid-argument', `model ${cfg.id} maxEdge must be an integer ≥ 16`)
+  if (cfg.type === 'command' && cfg.command.trim() === '') throw new ChengyingError('invalid-argument', `model ${cfg.id} command must not be empty`)
+  if (cfg.type === 'http') {
+    const url = new URL(cfg.url)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ChengyingError('invalid-argument', `model ${cfg.id} URL must use HTTP(S)`)
+  }
+  if (cfg.type === 'onnx') {
+    if (cfg.size !== undefined && (!Number.isInteger(cfg.size) || cfg.size < 1)) throw new ChengyingError('invalid-argument', `model ${cfg.id} size must be a positive integer`)
+    if (cfg.std?.some(value => !Number.isFinite(value) || value === 0) === true) throw new ChengyingError('invalid-argument', `model ${cfg.id} std values must be finite and nonzero`)
+    if (cfg.range !== undefined && (!cfg.range.every(Number.isFinite) || cfg.range[1] <= cfg.range[0])) throw new ChengyingError('invalid-argument', `model ${cfg.id} range must be finite and increasing`)
+  }
+}
+
 export function createModelScorer(cfg: ModelConfig): ModelScorer {
+  validateModelConfig(cfg)
   switch (cfg.type) {
     case 'builtin': return new BuiltinScorer(cfg)
     case 'command': return new CommandScorer(cfg)

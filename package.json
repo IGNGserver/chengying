@@ -4,6 +4,7 @@
   "description": "澄影 Chengying: AI photo culling and professional retouching agent workflow for DeepSeek Harness",
   "license": "UNLICENSED",
   "private": true,
+  "packageManager": "pnpm@10.33.0",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -53,6 +54,7 @@
     "test": "vitest run",
     "test:engines": "vitest run --config vitest.engines.config.ts",
     "test:dsh": "vitest run --config vitest.dsh.config.ts",
+    "test:packed": "node scripts/smoke-packed.mjs",
     "coverage:interfaces": "node lib/cli.js engines list"
   },
   "dependencies": {

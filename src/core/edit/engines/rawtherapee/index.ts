@@ -104,6 +104,32 @@ function normalizeRtStep(step: EditStep): EditStep {
   return { ...step, params }
 }
 
+const RT_EXTERNAL_PATHS: Record<string, readonly string[]> = {
+  'Film Simulation': ['ClutFilename'],
+  'Color Management': ['InputProfile', 'OutputProfile', 'PrinterProfile'],
+  LensProfile: ['LCPFile', 'LcpFile'],
+  'Lens Profile': ['LCPFile', 'LcpFile'],
+  'Flat Field': ['FlatFieldFile'],
+  'Dark Frame': ['DarkFrameFile'],
+}
+
+/** Validate every PP3 value that can make the external CLI open another file. */
+export function guardRawTherapeeProfilePaths(profile: Pp3, readable: ((path: string) => string) | undefined): void {
+  for (const [section, fields] of Object.entries(RT_EXTERNAL_PATHS)) {
+    const values = profile.get(section)
+    if (values === undefined) continue
+    for (const field of fields) {
+      const value = values.get(field)
+      if (value === undefined || value === '') continue
+      const alwaysExternal = section === 'Film Simulation' && field === 'ClutFilename'
+      const pathLike = /^(?:[a-zA-Z]:[\\/]|[\\/]|\.\.?[\\/])/.test(value) || /[\\/]/.test(value) || /\.(?:icc?|icm|png|jpe?g|tiff?|pp3)$/i.test(value)
+      if (!alwaysExternal && !pathLike) continue // RT built-in profile identifiers such as RTv4_sRGB
+      if (readable === undefined) throw new ChengyingError('permission-denied', `RawTherapee ${section}.${field} requires the project read guard`)
+      values.set(field, cliPath(readable(value)))
+    }
+  }
+}
+
 export class RawTherapeeEngine implements EngineAdapter {
   readonly id = 'rawtherapee'
   readonly title = 'RawTherapee'
@@ -170,7 +196,7 @@ export class RawTherapeeEngine implements EngineAdapter {
     rmSync(`${out}.pp3`, { force: true })
     const args = ['-O', cliPath(out), ...(sidecar !== undefined ? ['-s'] : []), '-Y', '-c', cliPath(probe)]
     const r = await run(this.cli as string, args, { timeoutMs: 120_000, env: rtEnv(join(this.opts.workDir, 'settings-probe')), signal })
-    if (!existsSync(`${out}.pp3`)) throw new ChengyingError('engine-failed', `rawtherapee-cli did not write a profile (${r.code}): ${(r.stderr || r.stdout).slice(-500)}`)
+    if (r.code !== 0 || r.timedOut || !existsSync(`${out}.pp3`)) throw new ChengyingError('engine-failed', `rawtherapee-cli did not write a valid profile (${r.timedOut ? 'timeout' : r.code}): ${(r.stderr || r.stdout).slice(-500)}`)
     return parsePp3(readFileSync(`${out}.pp3`, 'utf8'))
   }
 
@@ -317,6 +343,7 @@ export class RawTherapeeEngine implements EngineAdapter {
       ? (orient >= 5 ? { width: inputMeta.height, height: inputMeta.width } : { width: inputMeta.width, height: inputMeta.height })
       : (req.fullEdge !== undefined && req.fullEdge > 1 ? { width: req.fullEdge, height: req.fullEdge } : undefined)
     const profile = this.buildProfile(req.stage, catalog, dims)
+    guardRawTherapeeProfilePaths(profile, req.readable)
     if (req.maxEdge !== undefined && req.maxEdge > 0) {
       profile.set('Resize', new Map([['Enabled', 'true'], ['AppliesTo', 'Cropped area'], ['Method', 'Lanczos'], ['DataSpecified', '3'], ['Width', String(req.maxEdge)], ['Height', String(req.maxEdge)], ['AllowUpscaling', 'false']]))
     }
@@ -358,8 +385,11 @@ export class RawTherapeeEngine implements EngineAdapter {
           extraWarnings.push(`rounded integer parameters: ${rounded.join(', ')}`)
         }
       }
-      if (!existsSync(out)) throw new ChengyingError('engine-failed', `rawtherapee-cli failed (${r.code}): ${(r.stderr || r.stdout).split('\n').slice(-10).join('\n')}`, { recipe: ppPath })
-      const info = await sharp(out).metadata()
+      if (r.code !== 0 || r.timedOut || !existsSync(out)) throw new ChengyingError('engine-failed', `rawtherapee-cli failed (${r.timedOut ? 'timeout' : r.code}): ${(r.stderr || r.stdout).split('\n').slice(-10).join('\n')}`, { recipe: ppPath })
+      // A readable header is not enough: decode pixels so a truncated output
+      // left by a failed process cannot become a successful export.
+      await sharp(out, { failOn: 'error' }).stats()
+      const info = await sharp(out, { failOn: 'error' }).metadata()
       const warnings = [...extraWarnings, ...(r.stdout + r.stderr).split('\n').filter(l => /error|warning|cannot|failed/i.test(l)).slice(0, 10)]
       return { output: out, width: info.width ?? 0, height: info.height ?? 0, durationMs: r.durationMs, warnings, recipe: { path: ppPath, format: 'rawtherapee-pp3' }, command: [this.cli, ...args] }
     } finally {
