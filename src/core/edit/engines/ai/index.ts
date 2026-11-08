@@ -22,7 +22,7 @@
  */
 import sharp from 'sharp'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { platform } from 'node:os'
 import type { EditStage, EditStep } from '../../../types.ts'
@@ -34,7 +34,7 @@ import { blendWithMask, rasterizeMask } from '../builtin/masks.ts'
 import { gaussBlur, luminancePlane, toLinear, toSrgb } from '../builtin/image.ts'
 import { applyStyle, inpaintTelea, styleFingerprint, type StyleFingerprint } from './classical.ts'
 import { ChengyingError } from '../../../util/errors.ts'
-import { nowIso } from '../../../util/misc.ts'
+import { newId, nowIso } from '../../../util/misc.ts'
 import { run } from '../../../util/proc.ts'
 
 declare const __CHENGYING_VERSION__: string
@@ -84,6 +84,7 @@ export class AiEngine implements EngineAdapter {
   private probed: EngineProbe | undefined
   private srAvailable = false
   private resolvedSr: { command: string; args?: string[]; model?: string; timeoutMs?: number } | undefined
+  private readonly srJobs = new Map<string, Promise<void>>()
 
   constructor(private readonly opts: AiEngineOptions) {}
 
@@ -161,6 +162,7 @@ export class AiEngine implements EngineAdapter {
           kind: { type: 'string', enum: ['remove', 'fill', 'replace', 'enhance', 'expand', 'edit'], default: 'fill' },
           prompt: { type: 'string', default: '' },
           provider: { type: 'string', default: '' },
+          receipt: { type: 'string', description: 'immutable generated-asset receipt recorded by edit_generate' },
           authorization: { type: 'string', description: 'authorization id the generation ran under' },
           opacity: num(0, 1, 1, 'layer opacity'),
           feather: num(0, 0.05, 0.004, 'edge feather of the composite'),
@@ -202,8 +204,8 @@ export class AiEngine implements EngineAdapter {
     if (v.step.op === 'style_match' && v.step.params.fingerprint === undefined && v.step.params.reference_path === undefined) {
       throw new ChengyingError('invalid-argument', 'style_match needs fingerprint (edit_style_reference) or reference_path')
     }
-    if (v.step.op === 'gen_layer' && (typeof v.step.params.asset !== 'string' || typeof v.step.params.authorization !== 'string')) {
-      throw new ChengyingError('invalid-argument', 'gen_layer steps are created by edit_generate (asset + authorization)')
+    if (v.step.op === 'gen_layer' && (typeof v.step.params.asset !== 'string' || typeof v.step.params.authorization !== 'string' || typeof v.step.params.receipt !== 'string' || typeof v.step.params.provider !== 'string')) {
+      throw new ChengyingError('invalid-argument', 'gen_layer steps are created by edit_generate (receipt + asset + authorization + provider)')
     }
     if (v.step.op === 'upscale' && v.step.params.method === 'model' && !this.srAvailable) {
       v.warnings.push('no super-resolution model available; lanczos will be used')
@@ -249,11 +251,16 @@ export class AiEngine implements EngineAdapter {
           break
         }
         case 'gen_layer': {
-          const asset = (req.readable ?? ((x: string) => x))(String(p.asset))
+          if (req.generatedAsset === undefined) throw new ChengyingError('permission-denied', 'generated layers require the EditService asset-receipt verifier')
+          const verified = await req.generatedAsset({
+            receipt: String(p.receipt), authorization: String(p.authorization), provider: String(p.provider),
+            asset: String(p.asset), ...(typeof p.patch_asset === 'string' ? { patchAsset: p.patch_asset } : {}),
+          })
+          const asset = (req.readable ?? ((x: string) => x))(verified.asset)
           if (!existsSync(asset)) throw new ChengyingError('not-found', `generated layer ${asset} is missing; regenerate it with edit_generate`)
           let layer: FImage | undefined
-          if (typeof p.patch_asset === 'string' && p.patch_asset !== '' && Array.isArray(p.crop_box) && p.crop_box.length === 4) {
-            const patchPath = (req.readable ?? ((x: string) => x))(String(p.patch_asset))
+          if (verified.patchAsset !== undefined && Array.isArray(p.crop_box) && p.crop_box.length === 4) {
+            const patchPath = (req.readable ?? ((x: string) => x))(verified.patchAsset)
             if (existsSync(patchPath)) {
               const [bx, by, bw, bh] = p.crop_box.map(Number) as [number, number, number, number]
               const left = Math.max(0, Math.min(img.width - 1, Math.round(bx * img.width)))
@@ -339,16 +346,40 @@ export class AiEngine implements EngineAdapter {
     const native = Math.max(2, Math.min(4, Math.ceil(scale - 1e-6)))
     const cacheDir = join(this.opts.workDir, 'cache')
     mkdirSync(cacheDir, { recursive: true })
-    const input = join(req.scratchDir, `sr-in-${Date.now()}.png`)
-    await saveImage(img, input, 'png', 92, 8)
-    const key = createHash('sha1').update(readFileSync(input)).update(`${sr.command}|${JSON.stringify(sr.args)}|${sr.model}|${native}`).digest('hex')
+    const unique = newId('sr')
+    const input = join(req.scratchDir, `sr-in-${unique}.png`)
+    // Do not truncate 16-bit intermediate stages before the model sees them.
+    await saveImage(img, input, 'png', 92, 16)
+    let binaryIdentity = ''
+    try { const stat = statSync(sr.command); binaryIdentity = `${stat.size}:${stat.mtimeMs}` } catch { /* PATH command: probe/catalog identity still applies */ }
+    const key = createHash('sha256').update(readFileSync(input)).update(`${sr.command}|${binaryIdentity}|${JSON.stringify(sr.args)}|${sr.model}|${native}`).digest('hex')
     const cached = join(cacheDir, `${key}.png`)
-    if (!existsSync(cached)) {
-      const output = join(req.scratchDir, `sr-out-${Date.now()}.png`)
+    const produce = async (): Promise<void> => {
+      if (existsSync(cached)) return
+      const output = join(req.scratchDir, `sr-out-${unique}.png`)
       const args = (sr.args ?? ['-i', '{input}', '-o', '{output}', '-s', '{scale}']).map(a => a.replaceAll('{input}', input).replaceAll('{output}', output).replaceAll('{scale}', String(native)).replaceAll('{model}', sr.model ?? ''))
       const r = await run(sr.command, args, { timeoutMs: sr.timeoutMs ?? 600_000, signal: req.signal })
-      if (r.code !== 0 || !existsSync(output)) throw new ChengyingError('engine-failed', `super-resolution failed (${r.code}): ${r.stderr.slice(-800) || r.stdout.slice(-800)}`)
-      copyFileSync(output, cached)
+      if (r.code !== 0 || r.timedOut || !existsSync(output)) throw new ChengyingError('engine-failed', `super-resolution failed (${r.timedOut ? 'timeout' : r.code}): ${r.stderr.slice(-800) || r.stdout.slice(-800)}`)
+      // Decode before publication: an empty/truncated model output must never
+      // become a permanent cache hit. loadAsset below performs the full decode.
+      await sharp(output, { failOn: 'none' }).metadata()
+      await loadImage(output)
+      const temporary = join(cacheDir, `.${key}-${unique}.tmp.png`)
+      try {
+        copyFileSync(output, temporary)
+        if (!existsSync(cached)) renameSync(temporary, cached)
+      } finally { rmSync(temporary, { force: true }) }
+    }
+    if (!existsSync(cached)) {
+      if (req.signal !== undefined) await produce()
+      else {
+        let job = this.srJobs.get(key)
+        if (job === undefined) {
+          job = produce()
+          this.srJobs.set(key, job)
+        }
+        try { await job } finally { if (this.srJobs.get(key) === job) this.srJobs.delete(key) }
+      }
     }
     const target = { w: Math.round(img.width * scale), h: Math.round(img.height * scale) }
     return await loadAsset(cached, target.w, target.h)

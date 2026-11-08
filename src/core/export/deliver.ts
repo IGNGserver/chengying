@@ -3,12 +3,13 @@
  *  - originals: copy the selected source files byte-for-byte (cull-only);
  *  - manifest: describe exactly what was delivered and how it was produced.
  */
-import { copyFileSync, existsSync, mkdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
-import { nowIso } from '../util/misc.ts'
+import { newId, nowIso } from '../util/misc.ts'
 import type { Project } from '../project.ts'
 import type { Shot } from '../types.ts'
+import { commitPublications, releaseReservation, reserveArtifact, temporaryFor, type Reservation } from './atomic.ts'
 
 export type OriginalSource = 'raster' | 'raw' | 'both'
 
@@ -54,21 +55,10 @@ function collect(project: Project, opts: DeliverOriginalsOptions): string[] {
   return [...ids]
 }
 
-function uniqueTarget(dir: string, name: string): string {
-  let target = join(dir, name)
-  if (!existsSync(target)) return target
-  const ext = extname(name)
-  const base = basename(name, ext)
-  let index = 1
-  while (existsSync(join(dir, `${base}_${index}${ext}`))) index++
-  return join(dir, `${base}_${index}${ext}`)
-}
-
 function sourcesOf(project: Project, shot: Shot, source: OriginalSource): Array<{ id: string; kind: 'raw' | 'raster'; ext: string }> {
   const raw = source === 'raster' ? null : shot.rawFile
   const raster = source === 'raw' ? null : shot.rasterFile
   const chosen = [raw, raster].filter((id): id is string => id !== null)
-  // Fall back to whatever the shot actually has when the requested kind is absent.
   if (chosen.length === 0) {
     const fallback = shot.rasterFile ?? shot.rawFile
     if (fallback !== null) chosen.push(fallback)
@@ -98,16 +88,34 @@ export function deliverOriginals(project: Project, opts: DeliverOriginalsOptions
     }
     try {
       for (const src of sourcesOf(project, shot, source)) {
-        const readable = project.guard.readable(src.id)
-        const name = basename(readable)
-        // Extension-less intake copies keep their bytes; restore the extension
-        // the scanner recovered so the delivery opens everywhere.
-        const target = uniqueTarget(dir, extname(name) === '' && src.ext !== '' ? `${name}.${src.ext}` : name)
-        project.guard.writable(target)
-        copyFileSync(readable, target)
-        const stat = statSync(readable)
-        utimesSync(target, stat.atime, stat.mtime)
-        items.push({ shotId, sourcePath: readable, path: target, bytes: stat.size, kind: src.kind })
+        let reservation: Reservation | undefined
+        let temporary: string | undefined
+        try {
+          const readable = project.guard.readable(src.id)
+          const name = basename(readable)
+          // Extension-less intake copies keep their bytes; restore the extension
+          // the scanner recovered so the delivery opens everywhere.
+          const deliveryName = extname(name) === '' && src.ext !== '' ? `${name}.${src.ext}` : name
+          reservation = reserveArtifact(project.guard, dir, deliveryName, candidate => {
+            const previous = project.repo.deliveryArtifactAtPath(candidate)
+            return previous?.shotId === shotId && previous.sourcePath === readable
+          })
+          temporary = project.guard.writable(temporaryFor(reservation.target, newId('delivery'), 'copy'))
+          copyFileSync(readable, temporary)
+          const stat = statSync(readable)
+          utimesSync(temporary, stat.atime, stat.mtime)
+          opts.signal?.throwIfAborted()
+          const target = reservation.target
+          const replacing = reservation.replacing
+          commitPublications([{ temporary, target, overwrite: replacing }], () => {
+            project.repo.addDeliveryArtifact({ path: target, shotId, sourcePath: readable, kind: src.kind, bytes: stat.size })
+          })
+          temporary = undefined
+          items.push({ shotId, sourcePath: readable, path: target, bytes: stat.size, kind: src.kind })
+        } finally {
+          if (temporary !== undefined) { try { rmSync(temporary, { force: true }) } catch { /* scratch cleanup */ } }
+          releaseReservation(reservation)
+        }
       }
     } catch (error) {
       items.push({ shotId, error: errorMessage(error) })
@@ -130,11 +138,25 @@ export interface DeliveryManifest {
   items: unknown[]
 }
 
+function isChengyingManifest(path: string): boolean {
+  if (!existsSync(path)) return false
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as { format?: unknown }
+    return value.format === 'chengying-delivery/1'
+  } catch { return false }
+}
+
 /** Write the machine-readable delivery record next to the photos. */
 export function writeDeliveryManifest(project: Project, dir: string, manifest: Omit<DeliveryManifest, 'format' | 'deliveredAt'>): string {
   const root = project.addWritableRoot(dir)
-  mkdirSync(root, { recursive: true })
-  const path = project.guard.writable(join(root, 'manifest.json'))
-  writeFileSync(path, JSON.stringify({ format: 'chengying-delivery/1', deliveredAt: nowIso(), ...manifest }, null, 2))
-  return path
+  const reservation = reserveArtifact(project.guard, root, 'manifest.json', isChengyingManifest)
+  const temporary = project.guard.writable(temporaryFor(reservation.target, newId('manifest'), 'json'))
+  try {
+    writeFileSync(temporary, JSON.stringify({ format: 'chengying-delivery/1', deliveredAt: nowIso(), ...manifest }, null, 2), { flag: 'wx' })
+    commitPublications([{ temporary, target: reservation.target, overwrite: reservation.replacing }])
+    return reservation.target
+  } finally {
+    try { rmSync(temporary, { force: true }) } catch { /* scratch cleanup */ }
+    releaseReservation(reservation)
+  }
 }

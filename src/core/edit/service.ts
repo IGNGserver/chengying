@@ -6,8 +6,8 @@
  * before/after comparisons. Originals are only ever read.
  */
 import sharp from 'sharp'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import type { Project } from '../project.ts'
 import type { EngineRegistry } from './registry.ts'
 import type { EditDocument, EditStage, EditStep, MaskSpec, RevisionRecord, Shot, TaskRecord, TaskStatus } from '../types.ts'
@@ -21,6 +21,7 @@ import { loadAsset, writeMaskPng } from './engines/ai/index.ts'
 import { rgbToLab } from '../analysis/pixels.ts'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
 import { newId, nowIso, round } from '../util/misc.ts'
+import { sha256File } from '../integrity.ts'
 
 export type EditOp =
   | { op: 'add_step'; stage?: string | number; step: { op: string; params?: Record<string, unknown>; mask?: MaskSpec; instance?: number; label?: string; enabled?: boolean }; position?: number }
@@ -65,6 +66,7 @@ export interface RenderOutcome {
 }
 
 const ACTIVE: TaskStatus[] = ['queued', 'running', 'paused', 'waiting-authorization']
+const GENERATIVE_FLOW = Symbol('authorized-generative-flow')
 
 export async function imageStats(path: string, opts?: { faceBox?: [number, number, number, number] } | [number, number, number, number]): Promise<ImageStats> {
   const { data, info } = await sharp(path, { failOn: 'none' })
@@ -155,6 +157,9 @@ export class EditService {
   /** Default render-time authorization check (generative layers); set by the host. */
   authorize: ((engine: string, step: EditStep) => Promise<string | undefined>) | undefined
 
+  private readonly previewRenders = new Map<string, Promise<RenderOutcome>>()
+  private readonly originalRenders = new Map<string, Promise<string>>()
+
   constructor(readonly project: Project, readonly engines: EngineRegistry) {}
 
   private task(id: string): TaskRecord {
@@ -206,6 +211,10 @@ export class EditService {
       if (shot === undefined) throw new ChengyingError('not-found', `no shot ${shotId}`)
       const prev = this.project.repo.tasks({ shotId }).find(t => ACTIVE.includes(t.status) || t.status === 'succeeded')
       if (prev !== undefined && opts.force !== true) { existing.push(prev); continue }
+      if (prev !== undefined && opts.force === true && ACTIVE.includes(prev.status)) {
+        this.project.repo.updateTask(prev.id, { status: 'cancelled', error: 'superseded by force-created task', finishedAt: nowIso() })
+        this.project.repo.addEvent(prev.id, 'info', 'status', `${prev.status} → cancelled: superseded by force-created task`)
+      }
       const kind: 'raw' | 'raster' = shot.rawFile !== null ? 'raw' : 'raster'
       const engine = await this.engines.pick(kind, opts.engine)
       const probe = await this.engines.get(engine).probe()
@@ -258,9 +267,9 @@ export class EditService {
   }
 
   /** Apply operations atomically: everything validates, or nothing changes. */
-  async applyOps(taskId: string, ops: EditOp[], meta: { author: string; message?: string; signal?: AbortSignal; maxRevisions?: number }): Promise<{ revision: RevisionRecord; warnings: string[] }> {
+  async applyOps(taskId: string, ops: EditOp[], meta: { author: string; message?: string; signal?: AbortSignal; maxRevisions?: number; expectedHead?: string; systemGenerative?: typeof GENERATIVE_FLOW }): Promise<{ revision: RevisionRecord; warnings: string[] }> {
     const task = this.task(taskId)
-    if (task.status === 'cancelled') throw new ChengyingError('conflict', 'task is cancelled')
+    if (task.status === 'cancelled' || task.status === 'paused') throw new ChengyingError('conflict', `task is ${task.status}`)
     const maxRev = meta.maxRevisions ?? (typeof task.options.maxRevisions === 'number' ? task.options.maxRevisions : undefined)
     if (maxRev !== undefined && maxRev > 0 && meta.author.startsWith('agent')) {
       const agentEdits = this.project.repo.revisions(taskId).filter(r => r.author.startsWith('agent') && !r.message.startsWith('checkout #')).length
@@ -275,6 +284,7 @@ export class EditService {
     for (const o of ops) {
       switch (o.op) {
         case 'add_step': {
+          if (meta.systemGenerative !== GENERATIVE_FLOW && o.step.op.startsWith('gen_')) throw new ChengyingError('permission-denied', 'generative steps can only be created by the authorized provider flow')
           let si = this.stageIndex(doc, o.stage)
           if (si < 0) {
             // the stage whose engine knows this operation
@@ -299,6 +309,7 @@ export class EditService {
         case 'update_step': {
           const { stage, index } = this.findStep(doc, o.step_id)
           const step = stage.steps[index] as EditStep
+          if (meta.systemGenerative !== GENERATIVE_FLOW && step.op.startsWith('gen_')) throw new ChengyingError('permission-denied', 'generative steps cannot be changed through generic edit_apply; use revision history')
           if (o.params !== undefined) step.params = o.replace_params === true ? o.params : mergeParams(step.params, o.params)
           if (o.mask === null) delete step.mask
           else if (o.mask !== undefined) step.mask = o.mask
@@ -365,6 +376,7 @@ export class EditService {
           if (text === undefined) throw new ChengyingError('invalid-argument', 'import_recipe needs text or path')
           const cat = await this.engines.catalog(stage.engine, false, meta.signal)
           const imported = await e.importRecipe(text, cat, o.format)
+          if (meta.systemGenerative !== GENERATIVE_FLOW && imported.steps.some(step => step.op.startsWith('gen_'))) throw new ChengyingError('permission-denied', 'recipes containing generative layers cannot be imported through generic edit_apply')
           warnings.push(...imported.warnings)
           stage.steps = o.replace === true ? imported.steps : [...stage.steps, ...imported.steps]
           if (imported.options !== undefined) stage.options = { ...(stage.options ?? {}), ...imported.options }
@@ -416,6 +428,7 @@ export class EditService {
           break
         }
         case 'set_provenance': {
+          if (meta.systemGenerative !== GENERATIVE_FLOW && (o.generative !== undefined || o.authorization !== undefined)) throw new ChengyingError('permission-denied', 'generative provenance is managed only by the authorized provider flow')
           const pv = doc.provenance ?? {}
           if (o.generative !== undefined) pv.generative = o.generative
           if (o.authorization !== undefined) pv.authorizationIds = [...new Set([...(pv.authorizationIds ?? []), o.authorization])]
@@ -434,7 +447,11 @@ export class EditService {
           throw new ChengyingError('invalid-argument', `unknown edit op ${JSON.stringify((o as { op?: string }).op)}`)
       }
     }
-    const revision = this.project.repo.addRevision(taskId, head.id, doc, meta.message ?? summary.join(', '), meta.author)
+    const latestHead = this.task(taskId).headRevision
+    if (latestHead !== head.id || (meta.expectedHead !== undefined && latestHead !== meta.expectedHead)) {
+      throw new ChengyingError('conflict', `task ${taskId} head changed while operations were being validated; retry against the latest revision`, { expected: meta.expectedHead ?? head.id, actual: latestHead })
+    }
+    const revision = this.project.repo.addRevision(taskId, head.id, doc, meta.message ?? summary.join(', '), meta.author, meta.expectedHead ?? head.id)
     this.project.repo.addEvent(taskId, 'info', 'revision', `#${revision.seq} ${revision.message}`, { revisionId: revision.id, author: meta.author, warnings })
     return { revision, warnings }
   }
@@ -458,7 +475,17 @@ export class EditService {
     return this.checkout(taskId, parent.id, author)
   }
 
-  /** Render a revision through its stages. Previews are cached per revision and size. */
+  private async dependencyFingerprint(doc: EditDocument): Promise<string> {
+    const dependencies: string[] = []
+    for (const stage of doc.stages) for (const step of stage.steps) {
+      if (step.op !== 'lut3d' || typeof step.params.file !== 'string') continue
+      const path = this.project.guard.readable(step.params.file)
+      dependencies.push(path, await sha256File(path))
+    }
+    return fingerprintOf(dependencies)
+  }
+
+  /** Render a revision through its stages. Previews are cached by content, engine and output options. */
   async render(taskId: string, opts: { revisionId?: string; maxEdge?: number; format?: 'jpeg' | 'tiff' | 'png'; quality?: number; output?: string; signal?: AbortSignal; bitDepth?: 8 | 16; authorize?: (engine: string, step: EditStep) => Promise<string | undefined> } = {}): Promise<RenderOutcome> {
     const task = this.task(taskId)
     const rev = opts.revisionId !== undefined ? this.project.repo.revision(opts.revisionId) : this.head(taskId)
@@ -467,23 +494,75 @@ export class EditService {
     const edge = opts.maxEdge
     const dir = this.project.path('renders', taskId)
     mkdirSync(dir, { recursive: true })
-    const isPreview = opts.output === undefined
-    const finalPath = opts.output ?? join(dir, `${rev.id}-${edge ?? 'full'}.${format === 'tiff' ? 'tif' : format === 'png' ? 'png' : 'jpg'}`)
-    this.project.guard.writable(finalPath)
     const shot = this.project.repo.shot(task.shotId) as Shot
-    if (isPreview && existsSync(finalPath)) {
-      const faceBox = this.project.repo.features(shot.id)?.subject?.faceBox
-      const st = await imageStats(finalPath, { faceBox })
-      return { path: finalPath, width: st.width, height: st.height, cached: true, durationMs: 0, warnings: [], stats: st, stages: [] }
+    if (opts.output !== undefined) {
+      const finalPath = this.project.guard.writable(opts.output)
+      try {
+        return await this.renderDoc(shot, rev.doc, { ...opts, output: finalPath, taskId })
+      } catch (error) {
+        this.project.repo.addEvent(taskId, 'error', 'render-failed', errorMessage(error), { revisionId: rev.id })
+        throw error
+      }
     }
-    try {
-      const out = await this.renderDoc(shot, rev.doc, { ...opts, output: finalPath, taskId })
-      if (isPreview) this.project.repo.setRevisionPreview(rev.id, out.path, out.stats as unknown as Record<string, unknown>)
-      this.project.repo.addEvent(taskId, 'debug', 'render', `rendered #${rev.seq} ${out.width}×${out.height} in ${out.durationMs} ms`, { revisionId: rev.id, stages: out.stages, warnings: out.warnings })
-      return out
-    } catch (error) {
-      this.project.repo.addEvent(taskId, 'error', 'render-failed', errorMessage(error), { revisionId: rev.id })
-      throw error
+
+    const source = this.project.repo.file(rev.doc.sourceFile)
+    if (source === undefined) throw new ChengyingError('not-found', 'source file record missing; rescan the workspace')
+    const engineKeys: string[] = []
+    const generatedKeys: string[] = []
+    for (const stage of rev.doc.stages) {
+      engineKeys.push((await this.engines.catalog(stage.engine, false, opts.signal)).fingerprint)
+      for (const step of stage.steps) {
+        if (!step.enabled || !step.op.startsWith('gen_')) continue
+        const receipt = this.project.repo.generatedAsset(String(step.params.receipt ?? ''))
+        if (receipt !== undefined) {
+          generatedKeys.push(receipt.id, await sha256File(receipt.assetPath))
+          if (receipt.patchAssetPath !== null) generatedKeys.push(await sha256File(receipt.patchAssetPath))
+        }
+      }
+    }
+    const dependencyHash = await this.dependencyFingerprint(rev.doc)
+    const cacheKey = fingerprintOf([
+      rev.id, source.contentVersion ?? source.sha256 ?? 'unversioned', dependencyHash, format, edge,
+      opts.quality, opts.bitDepth, ...engineKeys, ...generatedKeys,
+    ])
+    const finalPath = this.project.guard.writable(join(dir, `${rev.id}-${cacheKey}.${format === 'tiff' ? 'tif' : format === 'png' ? 'png' : 'jpg'}`))
+    const execute = async (): Promise<RenderOutcome> => {
+      try {
+        if (existsSync(finalPath)) {
+          const faceBox = this.project.repo.features(shot.id)?.subject?.faceBox
+          const st = await imageStats(finalPath, { faceBox })
+          return { path: finalPath, width: st.width, height: st.height, cached: true, durationMs: 0, warnings: [], stats: st, stages: [] }
+        }
+        const extension = finalPath.slice(finalPath.lastIndexOf('.'))
+        const temporary = this.project.guard.writable(join(dir, `.${cacheKey}-${newId('render')}.tmp${extension}`))
+        try {
+          const rendered = await this.renderDoc(shot, rev.doc, { ...opts, output: temporary, taskId })
+          // Another process may have completed the same content while we worked.
+          // Either rename a complete file over the cache or keep its complete file;
+          // readers never see a partially written engine output.
+          if (existsSync(finalPath) && process.platform === 'win32') rmSync(temporary, { force: true })
+          else renameSync(temporary, finalPath)
+          const out = { ...rendered, path: finalPath }
+          this.project.repo.setRevisionPreview(rev.id, out.path, out.stats as unknown as Record<string, unknown>)
+          this.project.repo.addEvent(taskId, 'debug', 'render', `rendered #${rev.seq} ${out.width}×${out.height} in ${out.durationMs} ms`, { revisionId: rev.id, stages: out.stages, warnings: out.warnings })
+          return out
+        } finally {
+          rmSync(temporary, { force: true })
+        }
+      } catch (error) {
+        this.project.repo.addEvent(taskId, 'error', 'render-failed', errorMessage(error), { revisionId: rev.id })
+        throw error
+      }
+    }
+    // A caller-owned AbortSignal must not cancel other callers' shared work.
+    // Signal-less Host/UI requests are safe to deduplicate by the complete key.
+    if (opts.signal !== undefined) return await execute()
+    const pending = this.previewRenders.get(finalPath)
+    if (pending !== undefined) return await pending.then(out => ({ ...out, cached: true }))
+    const promise = execute()
+    this.previewRenders.set(finalPath, promise)
+    try { return await promise } finally {
+      if (this.previewRenders.get(finalPath) === promise) this.previewRenders.delete(finalPath)
     }
   }
 
@@ -518,7 +597,7 @@ export class EditService {
         const authorize = opts.authorize ?? this.authorize
         if (authorize !== undefined) {
           for (const s of stage.steps) {
-            if (!s.enabled) continue
+            if (!s.enabled || s.op.startsWith('gen_')) continue // gen_* is authorized by its immutable asset receipt below
             const denial = await authorize(stage.engine, s)
             if (denial !== undefined) throw new ChengyingError('authorization-required', denial, { step: s.id, op: s.op })
           }
@@ -530,6 +609,28 @@ export class EditService {
           input, inputKind, stage, output: out, format: last ? format : 'tiff', bitDepth: last ? opts.bitDepth : 16,
           maxEdge: i === 0 ? edge : undefined, quality: opts.quality, scratchDir: scratch, signal: opts.signal,
           orientation: file.meta.orientation ?? null, readable: (p: string) => this.project.guard.readable(p),
+          generatedAsset: async input => {
+            if (opts.taskId === undefined) throw new ChengyingError('permission-denied', 'generated assets require a task-bound render')
+            const task = this.task(opts.taskId)
+            const receipt = this.project.repo.generatedAsset(input.receipt)
+            const base = receipt === undefined ? undefined : this.project.repo.revision(receipt.baseRevisionId)
+            const samePath = (a: string, b: string | null): boolean => b !== null && resolve(a) === resolve(b)
+            if (receipt === undefined || base === undefined || receipt.taskId !== opts.taskId || receipt.shotId !== task.shotId || base.taskId !== opts.taskId
+              || receipt.authorizationId !== input.authorization || receipt.providerId !== input.provider || !samePath(input.asset, receipt.assetPath)
+              || (input.patchAsset !== undefined && !samePath(input.patchAsset, receipt.patchAssetPath))) {
+              throw new ChengyingError('permission-denied', 'generated asset receipt does not match this task, provider, authorization and asset')
+            }
+            const actualHash = await sha256File(receipt.assetPath)
+            if (actualHash !== receipt.assetSha256) throw new ChengyingError('verification-failed', `generated asset ${receipt.id} content hash changed`)
+            let patchAsset: string | undefined
+            if (input.patchAsset !== undefined) {
+              if (receipt.patchAssetPath === null || receipt.patchAssetSha256 === null) throw new ChengyingError('permission-denied', 'generated asset receipt has no crop patch')
+              const patchHash = await sha256File(receipt.patchAssetPath)
+              if (patchHash !== receipt.patchAssetSha256) throw new ChengyingError('verification-failed', `generated patch ${receipt.id} content hash changed`)
+              patchAsset = receipt.patchAssetPath
+            }
+            return { asset: receipt.assetPath, ...(patchAsset === undefined ? {} : { patchAsset }) }
+          },
           previewEdge: edge, fullEdge: Math.max(shot.width ?? file.meta.width ?? 0, shot.height ?? file.meta.height ?? 0) || undefined,
         }, cat)
         warnings.push(...r.warnings.map(w => `${stage.engine}: ${w}`))
@@ -547,8 +648,8 @@ export class EditService {
 
   /**
    * Develop the untouched source (no steps) so an original/final comparison is
-   * possible for RAW shots whose preview pipeline failed. Cached per task+edge:
-   * the result only changes when the source file or engine changes.
+   * possible for RAW shots whose preview pipeline failed. The cache includes
+   * source content, engine implementation/options and edge, and is atomically published.
    */
   async renderOriginal(taskId: string, opts: { maxEdge?: number; signal?: AbortSignal } = {}): Promise<string> {
     const task = this.task(taskId)
@@ -559,18 +660,37 @@ export class EditService {
     mkdirSync(dir, { recursive: true })
     const head = this.head(taskId)
     const first = head.doc.stages[0]
-    const primary = this.project.repo.file(shot.primaryFile)
-    const kind = primary?.kind === 'raw' ? 'raw' : 'raster'
+    const primary = this.project.repo.file(head.doc.sourceFile) ?? this.project.repo.file(shot.primaryFile)
+    if (primary === undefined) throw new ChengyingError('not-found', 'source file record missing; rescan the workspace')
+    const kind = primary.kind === 'raw' ? 'raw' : 'raster'
     const engine = first?.engine ?? task.engine ?? (await this.engines.pick(kind))
-    const optTag = first?.options && Object.keys(first.options).length > 0 ? `-${fingerprintOf([JSON.stringify(first.options)]).slice(0, 6)}` : ''
-    const out = this.project.guard.writable(join(dir, `original-${engine}-${edge}${optTag}.jpg`))
-    if (existsSync(out)) return out
+    const engineKey = (await this.engines.catalog(engine, false, opts.signal)).fingerprint
+    const cacheKey = fingerprintOf([primary.id, primary.contentVersion ?? primary.sha256 ?? 'unversioned', engine, engineKey, edge, JSON.stringify(first?.options ?? null)])
+    const out = this.project.guard.writable(join(dir, `original-${cacheKey}.jpg`))
     const doc: EditDocument = {
       ...head.doc,
       stages: [{ id: `stage_original_${engine}`, engine, steps: [], ...(first?.options !== undefined ? { options: first.options } : {}) }],
     }
-    const rendered = await this.renderDoc(shot, doc, { maxEdge: edge, format: 'jpeg', quality: 90, output: out, signal: opts.signal, taskId })
-    return rendered.path
+    const execute = async (): Promise<string> => {
+      if (existsSync(out)) return out
+      const temporary = this.project.guard.writable(join(dir, `.${cacheKey}-${newId('original')}.tmp.jpg`))
+      try {
+        opts.signal?.throwIfAborted()
+        await this.renderDoc(shot, doc, { maxEdge: edge, format: 'jpeg', quality: 90, output: temporary, signal: opts.signal, taskId })
+        opts.signal?.throwIfAborted()
+        if (existsSync(out) && process.platform === 'win32') rmSync(temporary, { force: true })
+        else renameSync(temporary, out)
+        return out
+      } finally { rmSync(temporary, { force: true }) }
+    }
+    if (opts.signal !== undefined) return await execute()
+    const pending = this.originalRenders.get(out)
+    if (pending !== undefined) return await pending
+    const promise = execute()
+    this.originalRenders.set(out, promise)
+    try { return await promise } finally {
+      if (this.originalRenders.get(out) === promise) this.originalRenders.delete(out)
+    }
   }
 
   /** Labeled side-by-side comparison image (original preview vs. revision, or two revisions). */
@@ -663,8 +783,16 @@ export class EditService {
    * must have checked the user's authorization; its id is stored in the step
    * and in the document provenance.
    */
-  async generate(taskId: string, opts: { provider: GenerativeProvider; kind: string; prompt: string; mask?: MaskSpec; authorizationId: string; author: string; maxEdge?: number; signal?: AbortSignal; message?: string }): Promise<{ revision: RevisionRecord; asset: string; warnings: string[]; provider: Record<string, unknown> }> {
-    const base = await this.render(taskId, { maxEdge: opts.maxEdge ?? 2048, format: 'png', signal: opts.signal })
+  async generate(taskId: string, opts: { provider: GenerativeProvider; kind: string; prompt: string; mask?: MaskSpec; authorizationId: string; author: string; maxEdge?: number; signal?: AbortSignal; message?: string }): Promise<{ revision: RevisionRecord; asset: string; receiptId: string; warnings: string[]; provider: Record<string, unknown> }> {
+    const task = this.task(taskId)
+    if (task.status === 'cancelled' || task.status === 'paused') throw new ChengyingError('conflict', `task is ${task.status}`)
+    const grant = this.project.repo.authorizations().find(item => item.id === opts.authorizationId)
+    if (grant === undefined || grant.scope !== 'generative' || grant.revoked || (grant.expiresAt !== null && grant.expiresAt <= nowIso())
+      || (grant.shotId !== null && grant.shotId !== task.shotId) || (grant.taskId !== null && grant.taskId !== taskId)) {
+      throw new ChengyingError('authorization-required', 'generative authorization is missing, revoked, expired or bound to another shot/task')
+    }
+    const baseRevision = this.head(taskId)
+    const base = await this.render(taskId, { revisionId: baseRevision.id, maxEdge: opts.maxEdge ?? 2048, format: 'png', signal: opts.signal })
     const dir = this.project.guard.writable(this.project.path('assets', taskId))
     mkdirSync(dir, { recursive: true })
     const scratch = this.project.path('scratch', 'gen', newId('g'))
@@ -775,6 +903,11 @@ export class EditService {
         // Normalise to the render size so the layer registers with the photo.
         await saveImage(await loadAsset(out.path, img.width, img.height), asset, 'png', 92, 16)
       }
+      const receipt = this.project.repo.recordGeneratedAsset({
+        authorizationId: opts.authorizationId, taskId, shotId: this.task(taskId).shotId, baseRevisionId: baseRevision.id,
+        providerId: opts.provider.id, assetPath: asset, assetSha256: await sha256File(asset),
+        patchAssetPath: patchAsset ?? null, patchAssetSha256: patchAsset === undefined ? null : await sha256File(patchAsset), detail: out.detail,
+      })
       const head = this.head(taskId)
       const ops: EditOp[] = []
       if (!head.doc.stages.some(st => st.engine === 'ai')) ops.push({ op: 'add_stage', engine: 'ai' })
@@ -784,6 +917,7 @@ export class EditService {
         step: {
           op: 'gen_layer',
           params: {
+            receipt: receipt.id,
             asset,
             ...(patchAsset && normCropBox ? { patch_asset: patchAsset, crop_box: normCropBox } : {}),
             kind: opts.kind,
@@ -796,9 +930,16 @@ export class EditService {
         },
       })
       ops.push({ op: 'set_provenance', generative: true, authorization: opts.authorizationId, note: `${opts.kind} via ${opts.provider.id} (${opts.provider.type}): ${opts.prompt.slice(0, 120)}` })
-      const { revision, warnings } = await this.applyOps(taskId, ops, { author: opts.author, message: opts.message ?? `generative ${opts.kind} via ${opts.provider.id}`, signal: opts.signal })
-      this.project.repo.addEvent(taskId, 'info', 'generative', `generated ${opts.kind} layer with ${opts.provider.id}`, { asset, authorization: opts.authorizationId, prompt: opts.prompt, provider: out.detail })
-      return { revision, asset, warnings, provider: out.detail }
+      try {
+        const { revision, warnings } = await this.applyOps(taskId, ops, { author: opts.author, message: opts.message ?? `generative ${opts.kind} via ${opts.provider.id}`, signal: opts.signal, expectedHead: baseRevision.id, systemGenerative: GENERATIVE_FLOW })
+        this.project.repo.addEvent(taskId, 'info', 'generative', `generated ${opts.kind} layer with ${opts.provider.id}`, { asset, receipt: receipt.id, authorization: opts.authorizationId, prompt: opts.prompt, provider: out.detail })
+        return { revision, asset, receiptId: receipt.id, warnings, provider: out.detail }
+      } catch (error) {
+        this.project.repo.deleteGeneratedAsset(receipt.id)
+        rmSync(asset, { force: true })
+        if (patchAsset !== undefined) rmSync(patchAsset, { force: true })
+        throw error
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }

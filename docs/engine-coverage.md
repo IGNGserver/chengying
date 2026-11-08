@@ -27,6 +27,8 @@ darktable 的发现顺序是 **darktable-mcp（5.7+）→ 随包发布的目录�
 
 Windows 的已知边界：`native/dt-introspect.c` 不适用（无 `dlopen`/`fork`）；既没有快照也没有 darktable-mcp 的版本会明确报错并给出可行路径，而不是抛 C 编译错误。`--outdir` 在 darktable 5.6.1 上不写文件，因此不使用它；输出路径改由 `cliPath()` 转成 `C:/…` 形式（已在 Windows VM 实测：`C:\…\out\a.jpg` 会被写成 `C:…outa.jpg`，`C:/…/out/b.jpg` 正常落盘）。
 
+CI 在 Linux、Windows，以及 `macos-15`（arm64）/ `macos-15-intel`（x86_64）执行不依赖外部引擎的完整单测；真实 darktable / RawTherapee 仍按本文的本机实测流程单独验证，不把“CI 通过”当作真实引擎通过。
+
 ## 验证方法（`chengying engines verify <engine>`）
 
 对目录中的**每一个**操作：

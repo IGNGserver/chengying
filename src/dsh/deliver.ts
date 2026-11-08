@@ -2,7 +2,8 @@
 import type { ChengyingRuntime } from './runtime.ts'
 import type { Project } from '../core/project.ts'
 import type { ToolRunContext } from './host-types.ts'
-import { join as joinPath, dirname, basename } from 'node:path'
+import { join as joinPath, basename } from 'node:path'
+import { releaseReservation, reserveArtifact } from '../core/export/atomic.ts'
 import { exportPhotos } from '../core/export/exporter.ts'
 import { deliverOriginals, writeDeliveryManifest, type OriginalSource } from '../core/export/deliver.ts'
 import { zipDirectory } from '../core/export/zip.ts'
@@ -26,7 +27,7 @@ export interface DeliveryRequest {
   c2pa?: boolean
   overwrite?: boolean
   background?: boolean
-  /** Also write a store-only .zip next to the delivery directory. */
+  /** Also write a store-only .zip inside the guarded delivery directory. */
   archive?: boolean
 }
 
@@ -105,10 +106,13 @@ export async function runDelivery(rt: ChengyingRuntime, project: Project, exec: 
       })
     }
     if (opts.archive === true) {
-      const archive = zipDirectory(result.dir, joinPath(dirname(result.dir), `${basename(result.dir)}.zip`))
-      result.archivePath = archive.path
-      result.archiveBytes = archive.bytes
-      result.archiveEntries = archive.entries
+      const reservation = reserveArtifact(project.guard, result.dir, `${basename(result.dir)}.zip`, () => false)
+      try {
+        const archive = zipDirectory(result.dir, project.guard.writable(reservation.target))
+        result.archivePath = archive.path
+        result.archiveBytes = archive.bytes
+        result.archiveEntries = archive.entries
+      } finally { releaseReservation(reservation) }
     }
     rt.updatePlanStage(project, exec, 'delivered')
     return result

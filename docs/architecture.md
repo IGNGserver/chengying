@@ -63,6 +63,7 @@ Web 的 web-app patch 会禁用全局模型工具行（bash、fs、jobs、subage
 
 - 聊天附件：Host 的附件对象按内容哈希存储（`DSH_HOME/attachments/v1/objects/<xx>/<sha256>`，无扩展名）。`photo_session_start` 汇总本会话人类消息里的附件，通过 `attachments.imageHostPath/fileHostPath` 找到只读路径，按 `mediaType` / 客户端文件名 / 文件头（`src/core/image/format.ts`）补齐扩展名，复制到 `<会话工作区>/_chengying_inbox/session-*/` 后作为工作区打开；交付默认落在 `<会话工作区>/_chengying_export/`。无会话工作区时回退 `stateRoot/inbox/`，`intake.location: state` 可显式使用旧行为。
 - 扫描兜底：`scanner` 对没有已知扩展名的文件读取文件头，识别为图片时用检测到的 `ext` 入库（TIFF 容器再用 ExifTool `FileTypeExtension` 细分 RAW），因此历史遗留的无扩展名 inbox 也能被重新扫描。
+- 动画与多页容器按静态照片处理：GIF、APNG、动画 WebP、HEIC/HEIF sequence 与多页 TIFF 的预览和 rendered 导出只使用第一帧/第一页；`originals` 交付仍逐字节复制完整原文件。澄影不承诺保留动画时序或全部页面。
 - `photo_deliver`：
   - `originals` 字节级复制入选原图；
   - `rendered` 走现有 exporter；

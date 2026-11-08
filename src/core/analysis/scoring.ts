@@ -221,7 +221,7 @@ export function fuseScores(dims: Partial<Record<string, number | undefined>>, we
   let wsum = 0
   for (const [k, w] of Object.entries(weights)) {
     const v = dims[k]
-    if (w === undefined || w <= 0 || v === undefined || Number.isNaN(v)) continue
+    if (w === undefined || !Number.isFinite(w) || w <= 0 || v === undefined || !Number.isFinite(v)) continue
     acc += v * w
     wsum += w
   }

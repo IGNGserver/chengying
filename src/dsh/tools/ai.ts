@@ -45,7 +45,7 @@ export function aiTaskTools(rt: ChengyingRuntime, bound?: { projectId: string; t
         if (args.mask === undefined && !['enhance', 'edit', 'expand'].includes(args.kind)) throw new ChengyingError('invalid-argument', `${args.kind} needs a mask`)
         const task = project.repo.task(taskId)
         if (task === undefined) throw new ChengyingError('not-found', `no task ${taskId}`)
-        const auth = await rt.acquireGenerative(project, task.shotId, exec, `Chengying: generative "${args.kind}" on photo ${task.shotId} — ${args.prompt.slice(0, 160)}. Reason: ${args.reason.slice(0, 300)}`)
+        const auth = await rt.acquireGenerative(project, task.shotId, exec, `Chengying: generative "${args.kind}" on photo ${task.shotId} — ${args.prompt.slice(0, 160)}. Reason: ${args.reason.slice(0, 300)}`, task.id)
         const svc = rt.edit(project)
         const r = await svc.generate(taskId, { provider, kind: args.kind, prompt: args.prompt, mask: args.mask, authorizationId: auth.id, author: exec.agent?.id === undefined ? 'agent' : `agent:${exec.agent.id.slice(0, 8)}`, maxEdge: args.size, signal: exec.signal, message: `generative ${args.kind}: ${args.reason.slice(0, 80)}` })
         const preview = await svc.render(taskId, { maxEdge: rt.config.editing.previewEdge, signal: exec.signal })
@@ -148,7 +148,7 @@ export function aiTools(rt: ChengyingRuntime): ToolDefinition[] {
               }
               if (task === undefined) throw new ChengyingError('internal', `could not create a task for ${shotId}`)
               taskId = task.id
-              const auth = await rt.acquireGenerative(project, shotId, exec, `AI redraw: ${args.prompt.slice(0, 160)}`)
+              const auth = await rt.acquireGenerative(project, shotId, exec, `AI redraw: ${args.prompt.slice(0, 160)}`, task.id)
               const generated = await svc.generate(task.id, {
                 provider,
                 kind: args.kind ?? 'edit',

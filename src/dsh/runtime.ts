@@ -69,8 +69,15 @@ export class ChengyingRuntime {
   private readonly current = new Map<string, string>()
   private lastProject: string | undefined
   private readonly controllers = new Map<string, AbortController>()
+  private readonly pending = new Set<Promise<unknown>>()
 
   constructor(readonly ctx: HostContext, readonly config: Config, readonly log: Log) {}
+
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.pending.add(promise)
+    void promise.finally(() => { this.pending.delete(promise) }).catch(() => undefined)
+    return promise
+  }
 
   /* ----------------------------------------------------------- projects */
 
@@ -281,7 +288,8 @@ export class ChengyingRuntime {
       if (ref.includes('/') || ref.includes('\\')) return this.openProject(ref, agentId)
       throw new ChengyingError('not-found', `unknown project "${ref}"; open it with photo_workspace_open first`)
     }
-    const id = (agentId !== undefined ? this.current.get(agentId) : undefined) ?? this.lastProject
+    const id = agentId !== undefined ? this.current.get(agentId) : this.lastProject
+    if (agentId !== undefined && id === undefined) throw new ChengyingError('not-found', 'no photo workspace is bound to this agent; call photo_workspace_open first')
     const p = id === undefined ? undefined : this.projects.get(id)
     if (p === undefined) throw new ChengyingError('not-found', 'no photo workspace is open; call photo_workspace_open with the folder path')
     return p
@@ -452,12 +460,11 @@ export class ChengyingRuntime {
    * an existing user grant, the configured policy, or an interactive DSH
    * approval prompt answered by the user. Never self-granted by an agent.
    */
-  async acquireGenerative(project: Project, shotId: string, exec: ToolRunContext, reason: string): Promise<{ id: string; grantedBy: string }> {
+  async acquireGenerative(project: Project, shotId: string, exec: ToolRunContext, reason: string, taskId?: string): Promise<{ id: string; grantedBy: string }> {
     const now = nowIso()
-    const grant = project.repo.authorizations().find(a => a.scope === 'generative' && !a.revoked && (a.shotId === null || a.shotId === shotId) && (a.expiresAt === null || a.expiresAt > now) && (a.maxUses === null || a.uses < a.maxUses))
-    if (grant !== undefined) {
-      project.repo.consumeAuthorization(grant.id)
-      return { id: grant.id, grantedBy: grant.grantedBy }
+    const grants = project.repo.authorizations().filter(a => a.scope === 'generative' && !a.revoked && (a.shotId === null || a.shotId === shotId) && (a.taskId === null || a.taskId === taskId) && (a.expiresAt === null || a.expiresAt > now) && (a.maxUses === null || a.uses < a.maxUses))
+    for (const grant of grants) {
+      if (project.repo.consumeAuthorization(grant.id)) return { id: grant.id, grantedBy: grant.grantedBy }
     }
     const create = (grantedBy: string): { id: string; grantedBy: string } => {
       const id = project.repo.addAuthorization({ scope: 'generative', shotId, taskId: null, grantedBy, note: reason.slice(0, 500), expiresAt: null, maxUses: 1 })
@@ -506,10 +513,10 @@ export class ChengyingRuntime {
   /** Start work detached from any agent (UI-initiated); progress is visible through activities. */
   startDetached<T>(kind: string, label: string, projectId: string | null, work: (signal: AbortSignal, progress: (stage: string, done: number, total: number, message?: string) => void) => Promise<T>): Activity {
     const { activity, signal, progress } = this.beginActivity(kind, label, projectId)
-    void work(signal, progress).then(
+    this.track(work(signal, progress).then(
       result => this.endActivity(activity, { result }),
       error => this.endActivity(activity, { error, cancelled: signal.aborted }),
-    )
+    ))
     return activity
   }
 
@@ -557,6 +564,7 @@ export class ChengyingRuntime {
                 return { status: cancelled ? 'killed' as const : 'failed' as const, detail: errorMessage(error).slice(0, 200) }
               }
             })()
+            this.track(done)
             return { cancel: () => { this.cancelActivity(activity.id) }, done }
           },
         })
@@ -720,9 +728,14 @@ export class ChengyingRuntime {
   }
 
   async close(): Promise<void> {
-    for (const c of this.controllers.values()) c.abort()
+    for (const c of this.controllers.values()) c.abort(new ChengyingError('cancelled', 'runtime shutting down'))
+    await Promise.allSettled([...this.pending])
+    await this.orchestrator?.close()
     await this.registryInstance?.close()
     await Promise.all([...this.projects.values()].map(p => p.close()))
     this.projects.clear()
+    this.editServices.clear()
+    this.current.clear()
+    this.lastProject = undefined
   }
 }

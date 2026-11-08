@@ -204,7 +204,16 @@ function solveHomography(src: Array<[number, number]>, dst: Array<[number, numbe
   return [...Array.from({ length: n }, (_, i) => (b[i] as number) / ((A[i] as number[])[i] as number)), 1]
 }
 
-let lutCache: { path: string; cube: ReturnType<typeof parseCube> } | undefined
+const lutCache = new Map<string, { source: string; cube: ReturnType<typeof parseCube> }>()
+function loadCube(path: string): ReturnType<typeof parseCube> {
+  const source = readFileSync(path, 'utf8')
+  const cached = lutCache.get(path)
+  if (cached?.source === source) return cached.cube
+  const cube = parseCube(source)
+  lutCache.delete(path); lutCache.set(path, { source, cube })
+  if (lutCache.size > 16) lutCache.delete(lutCache.keys().next().value as string)
+  return cube
+}
 
 export const BUILTIN_OPS: BuiltinOp[] = [
   {
@@ -623,8 +632,7 @@ export const BUILTIN_OPS: BuiltinOp[] = [
     apply: (img, p, ctx) => {
       if (!p.file) throw new ChengyingError('invalid-argument', 'lut3d.file is required')
       const path = ctx.readable(p.file)
-      if (lutCache?.path !== path) lutCache = { path, cube: parseCube(readFileSync(path, 'utf8')) }
-      const { size, table, domainMin, domainMax } = lutCache.cube
+      const { size, table, domainMin, domainMax } = loadCube(path)
       const at = (r: number, g: number, b: number, c: number): number => table[((b * size + g) * size + r) * 3 + c] as number
       return mapPixels(img, (r, g, b) => {
         const v = [r, g, b].map((x, i) => (clamp01((toSrgb(x) - (domainMin[i] ?? 0)) / ((domainMax[i] ?? 1) - (domainMin[i] ?? 0)))) * (size - 1))

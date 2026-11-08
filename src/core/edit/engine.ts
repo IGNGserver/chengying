@@ -89,6 +89,8 @@ export interface RenderRequest {
   signal?: AbortSignal
   /** Source orientation for engines that ignore it. */
   orientation?: number | null
+  /** Resolve and verify a persisted generated-asset receipt before a layer is read. */
+  generatedAsset?: (input: { receipt: string; authorization: string; provider: string; asset: string; patchAsset?: string }) => { asset: string; patchAsset?: string } | Promise<{ asset: string; patchAsset?: string }>
   /** Path guard for auxiliary files an operation reads (LUTs, profiles). */
   readable?: (path: string) => string
   /** Set for previews: the long edge the final image is shown at (stages after the first may still enlarge). */

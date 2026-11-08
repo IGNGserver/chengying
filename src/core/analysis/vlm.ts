@@ -60,18 +60,23 @@ export function parseVlmResponse(text: string, items: VlmItem[]): Map<string, Sc
   const arr = extractJsonArray(text)
   if (arr === undefined) return out
   const byLabel = new Map(items.map(i => [i.label.replace(/^#/, ''), i]))
-  arr.forEach((raw, index) => {
+  const seen = new Set<string>()
+  arr.forEach((raw) => {
     if (typeof raw !== 'object' || raw === null) return
     const r = raw as Record<string, unknown>
     const label = String(r.label ?? r.id ?? '').replace(/^#/, '')
-    const item = byLabel.get(label) ?? items[index]
-    if (item === undefined) return
+    const item = byLabel.get(label)
+    // Positional fallback can assign a score to the wrong photograph after a
+    // dropped/reordered model row. Labels are mandatory and duplicates ignored.
+    if (item === undefined || seen.has(item.shotId)) return
     const tags = Array.isArray(r.tags) ? r.tags.map(t => String(t).toLowerCase().trim()).filter(Boolean) : []
     const issues = Array.isArray(r.issues) ? r.issues.map(t => String(t).toLowerCase().trim()).filter(Boolean) : []
     const values = DIMS.map(d => rawNum(r[d]))
     // Some models answer on a 0..10 scale despite the instruction; detect per record.
     const present = values.filter((v): v is number => v !== undefined)
-    const scale = present.length > 0 && present.every(v => v <= 10) ? 10 : 1
+    const scale = present.length > 0 && present.every(v => v >= 0 && v <= 1) && present.some(v => v > 0 && v < 1)
+      ? 100
+      : present.length > 0 && present.every(v => v >= 0 && v <= 10) ? 10 : 1
     const num = (i: number): number | undefined => { const v = values[i]; return v === undefined ? undefined : clamp(v * scale, 0, 100) }
     const score: ScoreSet = {
       technical: num(0),
@@ -87,6 +92,8 @@ export function parseVlmResponse(text: string, items: VlmItem[]): Map<string, Sc
     }
     const dims = [score.technical, score.aesthetic, score.composition, score.content, score.story].filter((v): v is number => v !== undefined)
     score.overall = dims.length > 0 ? dims.reduce((a, b) => a + b, 0) / dims.length : undefined
+    if (dims.length === 0 || present.some(v => v < 0 || v > 100)) return
+    seen.add(item.shotId)
     out.set(item.shotId, score)
   })
   return out

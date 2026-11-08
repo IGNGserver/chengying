@@ -396,7 +396,10 @@ export class DarktableEngine implements EngineAdapter {
       if (req.maxEdge !== undefined && req.maxEdge > 0) baseArgs.push('--width', String(req.maxEdge), '--height', String(req.maxEdge))
       if (typeof opts.style === 'string' && opts.style !== '') { baseArgs.push('--style', opts.style); if (opts.style_overwrite === true) baseArgs.push('--style-overwrite') }
       if (typeof opts.icc_type === 'string') baseArgs.push('--icc-type', opts.icc_type)
-      if (typeof opts.icc_file === 'string') baseArgs.push('--icc-file', cliPath(opts.icc_file))
+      if (typeof opts.icc_file === 'string') {
+        if (req.readable === undefined) throw new ChengyingError('permission-denied', 'darktable icc_file requires the project read guard')
+        baseArgs.push('--icc-file', cliPath(req.readable(opts.icc_file)))
+      }
       if (typeof opts.icc_intent === 'string') baseArgs.push('--icc-intent', opts.icc_intent)
       baseArgs.push('--core', '--configdir', cliPath(configDir), '--library', ':memory:', '--conf', 'write_sidecar_files=never')
       if (req.format === 'jpeg') baseArgs.push('--conf', `plugins/imageio/format/jpeg/quality=${req.quality ?? 92}`)

@@ -50,8 +50,8 @@ export function sessionIdOf(exec: ToolRunContext): string {
   return exec.agent?.session.id ?? exec.agent?.id ?? 'default'
 }
 
-export function planKey(sessionId: string): string {
-  return `sessionPlan:${sessionId}`
+export function planKey(sessionId: string, projectId?: string): string {
+  return projectId === undefined ? `sessionPlan:${sessionId}` : `sessionPlan:${sessionId}:${projectId}`
 }
 
 /** Infer the rough goal from the user's own wording; the Agent can override it. */
@@ -64,20 +64,22 @@ export function inferGoal(text: string | undefined): SessionGoal | undefined {
 }
 
 export function readPlan(project: Project, sessionId: string): SessionPlan | undefined {
-  const raw = project.db.getMeta(planKey(sessionId))
+  const raw = project.db.getMeta(planKey(sessionId, project.id)) ?? project.db.getMeta(planKey(sessionId))
   if (raw === undefined) return undefined
   try {
     const value = JSON.parse(raw) as unknown
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
     const plan = value as SessionPlan
-    return typeof plan.id === 'string' && typeof plan.projectId === 'string' ? plan : undefined
+    return typeof plan.id === 'string' && plan.sessionId === sessionId && plan.projectId === project.id
+      && ['cull', 'retouch-deliver'].includes(plan.goal) && ['none', 'engine', 'generative', 'hybrid'].includes(plan.retouch)
+      ? plan : undefined
   } catch {
     return undefined
   }
 }
 
 export function writePlan(project: Project, plan: SessionPlan): SessionPlan {
-  project.db.setMeta(planKey(plan.sessionId), JSON.stringify(plan))
+  project.db.setMeta(planKey(plan.sessionId, plan.projectId), JSON.stringify(plan))
   return plan
 }
 
@@ -86,6 +88,7 @@ export function defaultPlan(project: Project, sessionId: string, source: string,
   const goal = options.goal ?? inferGoal(options.brief) ?? 'retouch-deliver'
   const retouch = goal === 'cull' ? 'none' : (options.retouch ?? 'engine')
   const changed = options.goal !== undefined && options.existing !== undefined && options.goal !== options.existing.goal
+  const checkpointChanged = options.existing !== undefined && ((options.retouch !== undefined && options.retouch !== options.existing.retouch) || (options.checkpoint !== undefined && options.checkpoint !== options.existing.checkpoint) || changed)
   const outputDir = resolveUserPath(options.outputDir ?? options.existing?.outputDir ?? project.exportDir, options.cwd)
   const plan: SessionPlan = {
     id: options.existing?.id ?? newId('plan'),
@@ -98,6 +101,7 @@ export function defaultPlan(project: Project, sessionId: string, source: string,
     outputDir,
     deliverMode: options.deliverMode ?? (changed ? undefined : options.existing?.deliverMode) ?? (goal === 'cull' ? 'originals' : 'rendered'),
     checkpoint: options.checkpoint ?? (changed ? undefined : options.existing?.checkpoint) ?? (goal === 'cull' ? 'none' : 'after-selection'),
+    checkpointApproved: checkpointChanged ? false : options.existing?.checkpointApproved,
     brief: options.brief ?? options.existing?.brief ?? '',
     stage: changed ? 'planned' : (options.existing?.stage ?? 'planned'),
     createdAt: options.existing?.createdAt ?? now,

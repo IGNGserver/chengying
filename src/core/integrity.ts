@@ -39,6 +39,9 @@ export interface IntegrityIssue {
 }
 
 export interface IntegrityReport {
+  /** True only when every checked existing file was compared by full SHA-256 to a pre-existing baseline. */
+  verified: boolean
+  level: 'stat' | 'full'
   ok: boolean
   checked: number
   captured: number
@@ -164,13 +167,22 @@ export class IntegrityService {
       if (baseline === undefined) continue
       checked++
       if (actual.size === baseline.size && actual.mtimeMs === baseline.mtime_ms) {
-        // A hash request also upgrades an unchanged file's baseline, so the next
-        // check can distinguish a touch from a content change without guessing.
-        if (options.hash === true && baseline.sha256 === null) {
+        if (options.hash === true) {
           try {
             const actualHash = await sha256File(file.path)
-            this.project.db.run('UPDATE originals_baseline SET sha256 = ? WHERE file_id = ?', actualHash, file.id)
             hashed++
+            if (baseline.sha256 === null) this.project.db.run('UPDATE originals_baseline SET sha256 = ? WHERE file_id = ?', actualHash, file.id)
+            else if (actualHash !== baseline.sha256) {
+              if (options.repair === true) {
+                this.project.db.run(
+                  'UPDATE originals_baseline SET size = ?, mtime_ms = ?, sha256 = ?, captured_at = ?, source = ? WHERE file_id = ?',
+                  actual.size, actual.mtimeMs, actualHash, nowIso(), 'repair', file.id,
+                )
+                repaired++
+              } else {
+                changed.push(issueOf(file, 'content', baseline, { ...actual, sha256: actualHash }, 'full SHA-256 differs even though size/mtime match'))
+              }
+            }
           } catch {
             missing.push(issueOf(file, 'missing'))
           }
@@ -220,10 +232,13 @@ export class IntegrityService {
     const notes: string[] = []
     if (captured > 0) notes.push(`captured ${captured} new baseline(s); re-run after the next scan for a complete reference`)
     if (repaired > 0) notes.push(`accepted the current files as the new baseline for ${repaired} file(s)`)
-    if (hashed > 0) notes.push(`computed full SHA-256 for ${hashed} changed file(s)`)
+    if (hashed > 0) notes.push(`computed full SHA-256 for ${hashed} file(s)`)
+    if (options.hash !== true) notes.push('stat-only check: unchanged size/mtime does not prove unchanged bytes; use hash=true for content verification')
     if (changed.some(i => i.expected?.sha256 === null) && options.hash !== true) notes.push('some baselines only have size/mtime; use hash=true for a definitive content check')
     return {
       ok,
+      verified: options.hash === true && ok && checked > 0 && captured === 0,
+      level: options.hash === true ? 'full' : 'stat',
       checked,
       captured,
       repaired,

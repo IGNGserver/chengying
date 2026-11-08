@@ -96,7 +96,9 @@ export class EngineRegistry {
     if (c === undefined) {
       c = this.get(id).catalog({ refresh, signal })
       this.catalogs.set(id, c)
-      c.catch(() => this.catalogs.delete(id))
+      c.catch(() => {
+        if (this.catalogs.get(id) === c) this.catalogs.delete(id)
+      })
     }
     return await c
   }

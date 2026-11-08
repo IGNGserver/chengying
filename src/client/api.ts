@@ -1,19 +1,30 @@
 /** Typed fetch helpers for the Chengying Host API (same origin, Harness session cookie). */
-export const API_BASE = '/api/chengying'
+const configuredBase = (globalThis as { __CHENGYING_API_BASE__?: unknown }).__CHENGYING_API_BASE__
+const metaBase = typeof document === 'undefined' ? undefined : document.querySelector('meta[name="chengying-api-base"]')?.getAttribute('content')
+const rawBase = typeof configuredBase === 'string' ? configuredBase : typeof metaBase === 'string' ? metaBase : '/api/chengying'
+const normalizedBase = rawBase.replace(/^\/+|\/+$/g, '')
+export const API_BASE = normalizedBase === '' ? '' : `/${normalizedBase}`
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message) }
 }
 
-export async function api<T>(path: string, init?: { method?: string; body?: unknown }): Promise<T> {
+export interface ApiInit { method?: string; body?: unknown; signal?: AbortSignal }
+
+export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    method: init?.method ?? 'GET',
+    method: init.method ?? 'GET',
     credentials: 'same-origin',
-    headers: init?.body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+    cache: 'no-store',
+    headers: init.body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
   })
   const text = await res.text()
-  const data = text === '' ? undefined : JSON.parse(text) as unknown
+  let data: unknown
+  if (text !== '') {
+    try { data = JSON.parse(text) as unknown } catch { throw new ApiError(res.status, 'invalid-response', 'The Host API returned a non-JSON response') }
+  }
   if (!res.ok) {
     const d = (data ?? {}) as { code?: string; message?: string }
     throw new ApiError(res.status, d.code ?? 'http', d.message ?? `HTTP ${res.status}`)
@@ -23,7 +34,7 @@ export async function api<T>(path: string, init?: { method?: string; body?: unkn
 
 export const imageUrl = (project: string, shot: string, variant: 'thumb' | 'preview'): string => `${API_BASE}/p/${encodeURIComponent(project)}/image/${encodeURIComponent(shot)}/${variant}`
 export const renderUrl = (project: string, revision: string): string => `${API_BASE}/p/${encodeURIComponent(project)}/render/${encodeURIComponent(revision)}`
-export const exportUrl = (project: string, exportId: string): string => `${API_BASE}/p/${encodeURIComponent(project)}/export-file/${encodeURIComponent(exportId)}`
+export const exportUrl = (project: string, exportId: string, kind: 'image' | 'raw' | 'recipe' | 'manifest' = 'image'): string => `${API_BASE}/p/${encodeURIComponent(project)}/export-file/${encodeURIComponent(exportId)}${kind === 'image' ? '' : `?kind=${kind}`}`
 
 export interface PlanInfo {
   id: string; sessionId: string; projectId: string; source: string

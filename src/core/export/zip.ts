@@ -7,9 +7,11 @@
  * implemented: a single delivery larger than 4 GiB reports a clear error and
  * the caller can fall back to the shell's zip/tar.
  */
-import { closeSync, mkdirSync, openSync, readSync, readdirSync, statSync, writeSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync, writeSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { ChengyingError, errorMessage } from '../util/errors.ts'
+import { newId } from '../util/misc.ts'
+import { commitPublications, temporaryFor } from './atomic.ts'
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256)
@@ -47,7 +49,7 @@ interface CentralRecord {
 function listFiles(root: string, dir: string, out: CentralRecord[], skip: Set<string>): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
-    if (skip.has(resolve(path))) continue
+    if (skip.has(resolve(path)) || entry.name.endsWith('.chengying.lock')) continue
     if (entry.isSymbolicLink()) continue
     if (entry.isDirectory()) {
       listFiles(root, path, out, skip)
@@ -64,19 +66,20 @@ export interface ZipResult {
 }
 
 /**
- * Write `dir` as a store-only zip at `out`. The archive is written next to the
- * directory by the caller (a sibling), so it is never included in itself.
+ * Write `dir` as a store-only zip at `out`. `out` may be inside `dir`; both the
+ * final path and its hidden staging file are excluded from the archive.
  */
 export function zipDirectory(dir: string, out: string): ZipResult {
   const root = statSync(dir)
   if (!root.isDirectory()) throw new ChengyingError('invalid-argument', `not a directory: ${dir}`)
   mkdirSync(dirname(out), { recursive: true })
+  const temporary = temporaryFor(out, newId('zip'), 'archive')
   const records: CentralRecord[] = []
-  listFiles(dir, dir, records, new Set([resolve(out)]))
+  listFiles(dir, dir, records, new Set([resolve(out), resolve(temporary)]))
   if (records.length === 0) throw new ChengyingError('invalid-argument', `nothing to archive in ${dir}`)
   if (records.length > 0xffff) throw new ChengyingError('unsupported', `too many files for a store-only zip (${records.length} > 65535); use the shell zip/tar`)
 
-  const fd = openSync(out, 'w')
+  const fd = openSync(temporary, 'wx')
   let offset = 0
   const writeAll = (buffer: Buffer): void => {
     let written = 0
@@ -131,7 +134,8 @@ export function zipDirectory(dir: string, out: string): ZipResult {
       } finally {
         closeSync(file)
       }
-      if (read !== stat.size) throw new ChengyingError('internal', `file changed while archiving: ${relativeName}`)
+      const after = statSync(path)
+      if (read !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new ChengyingError('internal', `file changed while archiving: ${relativeName}`)
       record.crc = (crc ^ 0xffffffff) >>> 0
       record.size = read
       // Rewrite the local header with the real CRC. The size is already correct
@@ -177,8 +181,10 @@ export function zipDirectory(dir: string, out: string): ZipResult {
     write(eocd)
   } catch (error) {
     closeSync(fd)
+    try { rmSync(temporary, { force: true }) } catch { /* scratch cleanup */ }
     throw error instanceof ChengyingError ? error : new ChengyingError('internal', `cannot write archive ${out}: ${errorMessage(error)}`, undefined, { cause: error })
   }
   closeSync(fd)
+  commitPublications([{ temporary, target: out, overwrite: false }])
   return { path: out, entries: records.length, bytes: statSync(out).size }
 }
