@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>澄影 Chengying · AI 摄影后期、非破坏式数字暗房与多 Agent 协同工作流</title>
+    <title>澄影 Chengying · 智能选片与自然光影精修助手</title>
     <meta
       name="description"
-      content="澄影（Chengying）是 DeepSeek Harness 的专业摄影后期插件：原片只读守护、AI 连拍筛图与行程叙事选片、darktable / RawTherapee 全接口场景参考线性暗房、沙盒化多 Agent 闭环修图，以及默认拒绝的生成式授权边界。"
+      content="澄影（Chengying）是面向旅行与日常摄影的温和修图伙伴（DeepSeek Harness 插件）：智能挑出眼神明亮的好片、自然温柔地调色与修饰人像、同组照片色调统一，原片始终完好保留，所有调整随时可退回。"
     />
     <link rel="canonical" href="https://chengying.igng.net/" />
     <meta name="msvalidate.01" content="B411826ACAE5C5CD20EA5574C3F8A6E4" />
@@ -18,16 +18,16 @@
     <meta property="og:site_name" content="澄影 Chengying" />
     <meta
       property="og:title"
-      content="澄影 Chengying · 让每一帧快门在非破坏式光影中苏醒"
+      content="澄影 Chengying · 留下旅途最好的瞬间，让每张照片自然耐看"
     />
     <meta
       property="og:description"
-      content="面向旅行与纪实摄影的 DeepSeek Harness 插件：AI 筛图叙事、32-bit 线性光数字暗房、darktable / RawTherapee 全量参数自省与可溯源生成式边界。"
+      content="帮你从海量连拍中挑出好片，用温柔有分寸的光影修饰留住当时的温度；原片永远完好无损，AI 换天需你点头才动手。"
     />
     <meta property="og:url" content="https://chengying.igng.net/" />
     <meta property="og:image" content="https://chengying.igng.net/og/og.jpg" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="澄影 Chengying · AI 摄影后期与非破坏式数字暗房" />
+    <meta name="twitter:title" content="澄影 Chengying · 智能选片与自然光影精修助手" />
     <meta name="twitter:image" content="https://chengying.igng.net/og/og.jpg" />
 
     <script type="application/ld+json">
@@ -39,7 +39,7 @@
         "operatingSystem": "macOS, Linux, Windows",
         "softwareVersion": "0.8.0",
         "url": "https://chengying.igng.net/",
-        "description": "AI photo culling, scene-referred RAW retouching, and isolated multi-agent post-production plugin for DeepSeek Harness.",
+        "description": "Your personal photography culling and natural light darkroom assistant for DeepSeek Harness, keeping originals untouched and every edit reversible.",
         "codeRepository": "https://github.com/IGNGserver/chengying"
       }
     </script>
@@ -59,12 +59,12 @@
         </a>
 
         <nav class="optical-nav-links" aria-label="章节导航">
-          <a href="#hero-stage" data-i18n="nav.hero">01 显影</a>
-          <a href="#cull-section" data-i18n="nav.cull">02 筛图墙</a>
-          <a href="#darkroom-section" data-i18n="nav.darkroom">03 数字暗房</a>
-          <a href="#agents-section" data-i18n="nav.agents">04 Agent 协同</a>
-          <a href="#boundary-section" data-i18n="nav.boundary">05 真实性契约</a>
-          <a href="#engines-section" data-i18n="nav.engines">06 引擎与安装</a>
+          <a href="#hero-stage" data-i18n="nav.hero">01 光影对比</a>
+          <a href="#cull-section" data-i18n="nav.cull">02 智能选片</a>
+          <a href="#darkroom-section" data-i18n="nav.darkroom">03 暗房调色</a>
+          <a href="#agents-section" data-i18n="nav.agents">04 成组精修</a>
+          <a href="#boundary-section" data-i18n="nav.boundary">05 真实守则</a>
+          <a href="#engines-section" data-i18n="nav.engines">06 支持与上手</a>
         </nav>
 
         <div class="optical-header-tools">
@@ -72,9 +72,9 @@
             type="button"
             id="toggle-surround-btn"
             class="tool-chip"
-            aria-label="切换暗房或画廊背景"
+            aria-label="切换暗房或画册背景"
           >
-            白卡画廊
+            纸质画册
           </button>
           <button type="button" id="toggle-lang-btn" class="tool-chip" aria-label="Switch Language">
             EN
@@ -108,23 +108,22 @@
         <div class="hero-top-intro">
           <div class="hero-headline-group">
             <div class="hero-eyebrow" data-i18n="hero.eyebrow">
-              DEEPSEEK HARNESS 摄影后期插件 · v0.8.0
+              澄影 CHENGYING · 你的私人数字暗房与选片助手
             </div>
             <h1 class="hero-headline" data-i18n="hero.headline">
-              让每一帧快门，在非破坏式光影中苏醒。
+              留下旅途最好的瞬间，让每张照片自然耐看。
             </h1>
           </div>
           <div class="hero-sub-col">
             <p class="hero-sublead" data-i18n="hero.sublead">
-              原片只读锁死，四阶引擎全量自省。从数百张旅途连拍的智能选片叙事，到 darktable /
-              RawTherapee 场景参考线性暗房与沙盒化子 Agent 闭环精修。
+              拍完几百张照片不再发愁：帮你挑出眼神明亮、对焦清晰的好片，温柔修饰光影与肤色。所有拍摄原片始终完好如初，每一次调整随时都能退回重来。
             </p>
             <div class="hero-cta-row">
               <a class="btn-primary" href="#darkroom-section" data-i18n="hero.ctaDarkroom">
-                进入交互式暗房
+                亲手试试调色
               </a>
               <a class="btn-ghost" href="#install-anchor" data-i18n="hero.ctaInstall">
-                安装至 DSH
+                三步轻松上手
               </a>
               <button
                 type="button"
@@ -133,7 +132,7 @@
                 aria-pressed="false"
                 data-i18n="hero.loupeBtn"
               >
-                2.4× 光学放大镜
+                2.4× 细节放大镜
               </button>
             </div>
           </div>
@@ -143,14 +142,14 @@
           <div
             id="hero-viewport"
             class="hero-viewport"
-            aria-label="原片与澄影场景参考精修实时光学对比视口"
+            aria-label="原片与澄影精修实时对比视口"
           >
             <!-- Instant high-priority LCP photograph + fallback CSS split before WebGL2 boots -->
             <img
               id="hero-lcp-master"
               class="hero-lcp-img"
               src="./photos/01-alpine-dawn.webp"
-              alt="贡嘎垭口破晓 — 澄影场景参考精修成片"
+              alt="贡嘎垭口破晓 — 澄影自然精修成片"
               width="1600"
               height="1067"
               fetchpriority="high"
@@ -165,14 +164,14 @@
               />
             </div>
 
-            <!-- Real-time WebGL2 Linear-Light Optical Split & Loupe Shader -->
+            <!-- Real-time WebGL2 Optical Split & Loupe Shader -->
             <canvas id="hero-gl-canvas" class="hero-gl-canvas"></canvas>
 
             <span class="hero-corner-tag tag-left" data-i18n="hero.rawTag">
-              RAW 传感器线性基线 (只读原片)
+              拍摄原片 · 完整保留
             </span>
             <span class="hero-corner-tag tag-right" data-i18n="hero.gradedTag">
-              澄影场景参考精修 (不可变修订)
+              澄影精修 · 自然耐看
             </span>
 
             <div id="hero-divider" class="hero-divider" aria-hidden="true">
@@ -180,15 +179,15 @@
             </div>
 
             <div class="hero-drag-caption" data-i18n="hero.dragHint">
-              左右拖动光学分界线 · 或向下滚动观看 RAW 线性显影
+              左右拖动对比线 · 感受原片与澄影精修的细微之别
             </div>
           </div>
 
-          <!-- Optical Instrument Telemetry Strip -->
+          <!-- Photography Story & Tone Readout Bar -->
           <div class="hero-telemetry-bar">
             <div class="hero-meta-primary">
               <div class="hero-meta-top">
-                <span id="hero-frame-code" class="frame-num-badge">FRAME 01A · DSC0014.ARW</span>
+                <span id="hero-frame-code" class="frame-num-badge">第 01A 格 · 相机 RAW 原片</span>
                 <strong id="hero-plate-title" class="hero-plate-name"
                   >贡嘎垭口 · 第一缕破晓金顶</strong
                 >
@@ -196,23 +195,22 @@
               </div>
               <div class="hero-meta-top">
                 <code id="hero-plate-exif" class="hero-plate-sub"
-                  >35mm · f/4.0 · 1/250s · ISO 64 · 14-bit ARW</code
+                  >35mm · f/4.0 · 1/250s · ISO 64</code
                 >
-                <code id="hero-plate-sha" class="hero-plate-sub"
-                  >sha256:9f4a…c81e (originalsIntact ✓)</code
+                <span id="hero-plate-sha" class="hero-plate-sub"
+                  >原始照片完好保存 · 随时可回到拍摄瞬间</span
                 >
               </div>
             </div>
 
             <div id="hero-plate-recipe" class="hero-meta-recipe">
-              darktable 5.6 场景参考显影：exposure +0.42 EV · sigmoid 柔和高光滚降 ·
-              colorbalancergb 冷暖分离
+              修图手记：轻轻压暗破晓云层高光，唤醒雪坡与碎石的暗部纹理，让峰顶暖金晨光与山谷微蓝薄雾自然分开。
             </div>
 
             <div class="hero-scope-box">
               <canvas id="hero-waveform" class="hero-waveform" width="116" height="32"></canvas>
-              <code id="hero-live-stats" class="hero-live-stats"
-                >p05 17 · p50 100 · p95 200 · 5098K</code
+              <span id="hero-live-stats" class="hero-live-stats"
+                >色温 5098K · 右侧精修画面占 56%</span
               >
             </div>
           </div>
@@ -221,7 +219,7 @@
         <div class="hero-bottom-strip">
           <div id="hero-plate-switcher" class="hero-plate-switcher" role="group" aria-label="切换首屏摄影作品"></div>
           <label class="hero-a11y-slider">
-            <span>SPLIT</span>
+            <span data-i18n="hero.splitLabel">对比位置</span>
             <input
               id="hero-split-range"
               type="range"
@@ -235,31 +233,29 @@
       </section>
 
       <!-- =====================================================================
-           ACT II · DYNAMIC AI CULLING WALL & NARRATIVE ESSAY
+           ACT II · SMART CULLING WALL & STORY CURATION
            ===================================================================== -->
       <section id="cull-section" class="act-section shell-wrap" data-reveal>
         <header class="act-header">
           <div class="act-kicker" data-i18n="cull.chapter">
-            ACT II · DYNAMIC AI CULLING & NARRATIVE
+            第二幕 · 智能选片与故事整理
           </div>
-          <h2 class="act-title" data-i18n="cull.title">从繁杂连拍，到有呼吸感的照片叙事</h2>
+          <h2 class="act-title" data-i18n="cull.title">拍了几百张，只把最动人的瞬间留给你。</h2>
           <p class="act-lead" data-i18n="cull.lead">
-            旅行归来面对数百张原片：澄影在本地 Worker 池提取双感知哈希、Laplacian
-            局部锐度、结构张量运动拖影、地平线倾角与传感器余量，并以 1:1
-            黄框人脸画中画联系表联动视觉模型决胜微表情——全程绝不删除或移动任何原图。
+            刚下旅途或聚会归来，不必再对着满屏相似连拍熬夜翻找。澄影会自动找出眨眼、手抖模糊、跑焦和重复画面，也会留意虽然偏暗、却能救回丰富层次的潜质好片——然后用日常语言说出你的想法，就能理出一本旅途故事集。
           </p>
         </header>
 
         <div class="cull-toolbar">
           <div class="cull-stage-row">
-            <div class="cull-pill-group" role="group" aria-label="筛图动画阶段">
+            <div class="cull-pill-group" role="group" aria-label="选片步骤演示">
               <button
                 type="button"
                 class="cull-stage-btn is-active"
                 data-cull-stage="all"
                 data-i18n="cull.stageAll"
               >
-                ① 全量底片台 (24 帧)
+                ① 全部拍摄原片 (24 张)
               </button>
               <button
                 type="button"
@@ -267,7 +263,7 @@
                 data-cull-stage="diag"
                 data-i18n="cull.stageDiag"
               >
-                ② 连拍聚类与缺陷诊断
+                ② 标记连拍与瑕疵照片
               </button>
               <button
                 type="button"
@@ -275,7 +271,7 @@
                 data-cull-stage="fade"
                 data-i18n="cull.stageFade"
               >
-                ③ 淘汰帧淡出 (0 字节删改)
+                ③ 筛除废片 (原片一张不删)
               </button>
               <button
                 type="button"
@@ -283,7 +279,7 @@
                 data-cull-stage="narrative"
                 data-i18n="cull.stageNarrative"
               >
-                ④ MMR 行程叙事成片 (8 帧)
+                ④ 精选 8 张旅途故事集
               </button>
             </div>
 
@@ -293,12 +289,12 @@
               class="btn-ghost"
               data-i18n="cull.vlmCompareTitle"
             >
-              连拍组 G-06 · 1:1 人脸放大画中画同表复核 (photo_vlm_score)
+              放大对比连拍细节 · 看清谁没眨眼 (第 08 组)
             </button>
           </div>
 
           <div class="cull-nl-row">
-            <span class="cull-nl-label" data-i18n="cull.nlLabel">自然语言选片 (photo_select)：</span>
+            <span class="cull-nl-label" data-i18n="cull.nlLabel">试着用日常语言选片：</span>
             <div class="cull-pill-group">
               <button
                 type="button"
@@ -306,7 +302,7 @@
                 data-nl-select="narrative"
                 data-i18n="cull.nlNarrative"
               >
-                「按行程叙事选 8 张代表作」
+                「挑出 8 张串起整趟旅程的代表作」
               </button>
               <button
                 type="button"
@@ -314,7 +310,7 @@
                 data-nl-select="portrait"
                 data-i18n="cull.nlPortrait"
               >
-                「优先人像与手作人文」
+                「优先留人物眼神光和手作温度」
               </button>
               <button
                 type="button"
@@ -322,7 +318,7 @@
                 data-nl-select="potential"
                 data-i18n="cull.nlPotential"
               >
-                「高动态余量风光 (≥92 分)」
+                「留高画质大片潜质的风光 (92分+)」
               </button>
               <button
                 type="button"
@@ -330,16 +326,16 @@
                 data-nl-select="all"
                 data-i18n="cull.nlReset"
               >
-                「展开全部 24 张底片」
+                「看回全部 24 张底片」
               </button>
             </div>
           </div>
 
           <div class="cull-cli-bar">
-            <code id="cull-cli-readout"
-              >chengying cull ./2026-expedition # -> 24 shots, 8 groups, originalsIntact=true</code
+            <span id="cull-cli-readout" class="cull-summary-readout"
+              >已自动认出 8 组连拍，挑出闭眼、手抖、跑焦与重复拷贝，帮你留下最稳的画面</span
             >
-            <span id="cull-live-counter" class="cull-live-counter">底片台共 24 帧</span>
+            <span id="cull-live-counter" class="cull-live-counter">底片台展示全部 24 张拍回原片</span>
           </div>
         </div>
 
@@ -348,12 +344,12 @@
 
         <div class="cull-foot-bar">
           <span data-i18n="cull.zeroDeleteNote"
-            >FsGuard 原片只读保证：淘汰仅写入 SQLite flags 表，原始 RAW/JPEG 字节零改动。</span
+            >安心承诺：淘汰只是悄悄做了记号，你文件夹里的原片一张都不会被删除或覆盖。</span
           >
-          <code>SQLite WAL · 20 Tables · pHash 64-bit DCT + Lab 8×8 + Immerkær Noise</code>
+          <span data-i18n="cull.footBadge">支持相机 RAW 与手机照片 · 原片始终单独保存</span>
         </div>
 
-        <!-- VLM Burst Comparison Modal -->
+        <!-- Burst Comparison Modal -->
         <div
           id="cull-burst-modal"
           class="cull-modal-backdrop"
@@ -364,8 +360,10 @@
         >
           <div class="cull-modal-dialog">
             <div class="cull-modal-head">
-              <h3 id="cull-modal-title">连拍组同表复核</h3>
-              <button type="button" id="cull-modal-close" class="tool-chip">ESC / ✕</button>
+              <h3 id="cull-modal-title">连拍组放大对比</h3>
+              <button type="button" id="cull-modal-close" class="tool-chip" data-i18n="cull.modalClose">
+                关闭 ✕
+              </button>
             </div>
             <div id="cull-modal-body" class="burst-compare-grid"></div>
           </div>
@@ -373,24 +371,23 @@
       </section>
 
       <!-- =====================================================================
-           ACT III · INTERACTIVE WEBGL2 DIGITAL DARKROOM
+           ACT III · INTERACTIVE DIGITAL DARKROOM
            ===================================================================== -->
       <section id="darkroom-section" class="act-section shell-wrap" data-reveal>
         <header class="act-header">
           <div class="act-kicker" data-i18n="darkroom.chapter">
-            ACT III · INTERACTIVE SCENE-REFERRED DARKROOM
+            第三幕 · 可交互数字暗房
           </div>
-          <h2 class="act-title" data-i18n="darkroom.title">专业数字暗房 · 线性光实时显影台</h2>
+          <h2 class="act-title" data-i18n="darkroom.title">有分寸的调色，留住当时眼见的温度。</h2>
           <p class="act-lead" data-i18n="darkroom.lead">
-            拒绝千篇一律的重度滤镜。在 32-bit 浮点线性色彩空间中体验澄影内置的跨引擎风格配方、Fritsch–Carlson
-            单调三次样条分通道曲线、局部几何/参数化蒙版与五条审美一票否决红线。
+            不用套用千篇一律的厚重滤镜。在这里轻轻拖动滑块、拨动曲线或选一种胶片色调，就能实时看到高光变柔和、暗部现出细节、局部光影被温柔照亮。遇上过度修饰人像皮肤或强拉发白时，系统还会贴心提醒你及时收手。
           </p>
         </header>
 
         <div id="dr-photo-tabs" class="dr-photo-tabs" role="tablist" aria-label="暗房样片切换"></div>
 
         <div class="darkroom-workbench">
-          <!-- Left: GPU Calibrated Viewport + Revisions + Live Native Sidecar -->
+          <!-- Left: Viewport + Revisions + Folded Pro Sidecar -->
           <div class="dr-stage-column">
             <div class="dr-viewport-toolbar">
               <div class="dr-tool-btns">
@@ -403,7 +400,7 @@
                   aria-pressed="false"
                   data-i18n="darkroom.splitToggle"
                 >
-                  同屏分割对比
+                  分屏对比
                 </button>
                 <button
                   type="button"
@@ -411,7 +408,7 @@
                   aria-pressed="false"
                   data-i18n="darkroom.maskOverlay"
                 >
-                  蒙版密度叠加 (M)
+                  查看局部蒙版范围 (M)
                 </button>
                 <button
                   type="button"
@@ -419,11 +416,11 @@
                   aria-pressed="false"
                   data-i18n="darkroom.zebraToggle"
                 >
-                  高光/死黑斑马纹 (Z)
+                  过曝/死黑提示 (Z)
                 </button>
               </div>
-              <code id="dr-live-photometrics" class="hero-live-stats"
-                >p05 16 · p50 109 · p95 219 · clipHigh 0.24%</code
+              <span id="dr-live-photometrics" class="hero-live-stats"
+                >色温 4966K · 高光柔和，明暗细节自然</span
               >
             </div>
 
@@ -431,52 +428,63 @@
               <canvas id="dr-gl-canvas" class="dr-gl-canvas"></canvas>
             </div>
 
-            <!-- Live Veto Red-Line Guardrail Banner -->
+            <!-- Gentle Over-Editing Reminder Banner -->
             <div id="dr-guardrail-banner" class="dr-guardrail-banner" hidden>
-              <span id="dr-guardrail-msg">审美红线提示</span>
-              <button type="button" id="dr-guardrail-fix">按红线自动收敛</button>
+              <span id="dr-guardrail-msg">温柔提醒</span>
+              <button type="button" id="dr-guardrail-fix" data-i18n="darkroom.guardrailFix">
+                一键恢复自然质感
+              </button>
             </div>
 
             <div class="dr-exif-strip">
-              <span id="dr-active-exif">Leica M11 · 50mm f/1.4 · ISO 800 · 14-bit DNG</span>
-              <span>提示：开启局部蒙版后可直接在画面上拖动蒙版中心坐标</span>
+              <span id="dr-active-exif">Leica M11 · 50mm f/1.4 · ISO 800</span>
+              <span data-i18n="darkroom.maskDragHint"
+                >小提示：开启局部修饰后，可直接用鼠标在左图上拖动柔光圈位置。</span
+              >
             </div>
 
-            <!-- Immutable Revision DAG Strip -->
+            <!-- Revision Snapshots Strip -->
             <div class="dr-revision-bar">
               <div class="dr-revision-actions">
-                <code style="font-size: 0.72rem; color: var(--text-secondary)"
-                  >Immutable Revisions (CAS expectedHead)</code
+                <span class="dr-rev-caption" data-i18n="darkroom.revSectionLabel"
+                  >每一次修图步骤都会留存，随时点选回到任意一版</span
                 >
                 <div class="dr-tool-btns">
                   <button type="button" id="dr-btn-revert" data-i18n="darkroom.revertBtn">
-                    回退上一修订 (edit_revert)
+                    退回上一版
                   </button>
                   <button type="button" id="dr-btn-commit" data-i18n="darkroom.commitBtn">
-                    记录新修订 (edit_apply)
+                    存为新版本
                   </button>
                 </div>
               </div>
               <div id="dr-revision-list" class="dr-revision-list"></div>
             </div>
 
-            <!-- Native Multi-Engine Sidecar Inspector -->
-            <div class="dr-sidecar-box">
-              <div class="dr-sidecar-head">
-                <span data-i18n="darkroom.recipeOutTitle">实时原生旁车配方导出 (_recipes/)</span>
-                <div class="dr-fmt-tabs" role="group" aria-label="旁车配方格式">
-                  <button type="button" class="is-active" data-recipe-fmt="json">
-                    .chengying.json
-                  </button>
-                  <button type="button" data-recipe-fmt="xmp">darktable .xmp</button>
-                  <button type="button" data-recipe-fmt="pp3">RawTherapee .pp3</button>
+            <!-- Folded by Default: Pro Desktop Software Recipe Export -->
+            <details class="pro-fold dr-sidecar-box" id="dr-sidecar-details">
+              <summary class="pro-fold-summary" id="dr-sidecar-summary">
+                <span data-i18n="darkroom.sidecarFoldTitle">
+                  展开专业修图软件配方文件（支持导入 darktable / RawTherapee 继续微调）
+                </span>
+              </summary>
+              <div class="pro-fold-body">
+                <div class="dr-sidecar-head">
+                  <span data-i18n="darkroom.recipeOutTitle">同步生成的专业工程文件（随时另存打开）</span>
+                  <div class="dr-fmt-tabs" role="group" aria-label="配方文件格式">
+                    <button type="button" class="is-active" data-recipe-fmt="json">
+                      .chengying.json
+                    </button>
+                    <button type="button" data-recipe-fmt="xmp">darktable .xmp</button>
+                    <button type="button" data-recipe-fmt="pp3">RawTherapee .pp3</button>
+                  </div>
                 </div>
+                <pre id="dr-recipe-code" class="dr-recipe-code"></pre>
               </div>
-              <pre id="dr-recipe-code" class="dr-recipe-code"></pre>
-            </div>
+            </details>
           </div>
 
-          <!-- Right: Precision Darkroom Controls -->
+          <!-- Right: Darkroom Controls -->
           <aside class="dr-controls-rack" aria-label="暗房参数调节台">
             <div class="dr-scope-panel">
               <canvas id="dr-hist-canvas" class="dr-hist-canvas" width="320" height="68"></canvas>
@@ -484,68 +492,68 @@
 
             <div>
               <h3 class="dr-block-title" data-i18n="darkroom.recipesLabel">
-                跨引擎专业配方 (chengying-style-recipes)
+                内置摄影质感预设（点选即用）
               </h3>
               <div id="dr-recipe-pills" class="dr-recipe-pills"></div>
             </div>
 
             <div class="dr-rack-block">
               <h3 class="dr-block-title" data-i18n="darkroom.slidersTitle">
-                线性光曝光与影调 (Scene-Referred)
+                光线、白平衡与色彩微调
               </h3>
               <div class="dr-sliders-grid">
                 <div class="dr-slider-row">
-                  <label for="dr-sl-exposure">Exposure</label>
+                  <label for="dr-sl-exposure" data-i18n="darkroom.sliderExposure">整体曝光</label>
                   <input id="dr-sl-exposure" type="range" min="-180" max="180" value="12" />
                   <output id="dr-val-exposure">+0.12 EV</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-temp">Temp</label>
+                  <label for="dr-sl-temp" data-i18n="darkroom.sliderTemp">色温冷暖</label>
                   <input id="dr-sl-temp" type="range" min="-50" max="50" value="6" />
                   <output id="dr-val-temp">4966K (+6)</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-tint">Tint</label>
+                  <label for="dr-sl-tint" data-i18n="darkroom.sliderTint">偏色校正</label>
                   <input id="dr-sl-tint" type="range" min="-50" max="50" value="2" />
                   <output id="dr-val-tint">+2</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-highlights">Highlights</label>
+                  <label for="dr-sl-highlights" data-i18n="darkroom.sliderHighlights">高光柔化</label>
                   <input id="dr-sl-highlights" type="range" min="-90" max="50" value="-26" />
                   <output id="dr-val-highlights">-26</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-shadows">Shadows</label>
+                  <label for="dr-sl-shadows" data-i18n="darkroom.sliderShadows">暗部提亮</label>
                   <input id="dr-sl-shadows" type="range" min="-50" max="80" value="18" />
                   <output id="dr-val-shadows">+18</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-contrast">Contrast</label>
+                  <label for="dr-sl-contrast" data-i18n="darkroom.sliderContrast">明暗对比</label>
                   <input id="dr-sl-contrast" type="range" min="-45" max="45" value="4" />
                   <output id="dr-val-contrast">+4</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-blacks">Blacks</label>
+                  <label for="dr-sl-blacks" data-i18n="darkroom.sliderBlacks">深暗层次</label>
                   <input id="dr-sl-blacks" type="range" min="-40" max="40" value="-8" />
                   <output id="dr-val-blacks">-8</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-vibrance">Vibrance</label>
+                  <label for="dr-sl-vibrance" data-i18n="darkroom.sliderVibrance">自然鲜艳</label>
                   <input id="dr-sl-vibrance" type="range" min="-40" max="50" value="9" />
                   <output id="dr-val-vibrance">+9</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-saturation">Saturation</label>
+                  <label for="dr-sl-saturation" data-i18n="darkroom.sliderSaturation">整体色彩</label>
                   <input id="dr-sl-saturation" type="range" min="-40" max="35" value="-3" />
                   <output id="dr-val-saturation">-3</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-clarity">Clarity</label>
+                  <label for="dr-sl-clarity" data-i18n="darkroom.sliderClarity">清晰质感</label>
                   <input id="dr-sl-clarity" type="range" min="-25" max="35" value="-4" />
                   <output id="dr-val-clarity">-4</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-dehaze">Dehaze</label>
+                  <label for="dr-sl-dehaze" data-i18n="darkroom.sliderDehaze">通透去雾</label>
                   <input id="dr-sl-dehaze" type="range" min="0" max="25" value="0" />
                   <output id="dr-val-dehaze">0</output>
                 </div>
@@ -554,46 +562,69 @@
 
             <div class="dr-rack-block">
               <h3 class="dr-block-title" data-i18n="darkroom.curveTitle">
-                Fritsch–Carlson 分通道样条曲线 (拖拽控制点)
+                明暗与色彩曲线（拖动圆点调整反差）
               </h3>
               <div class="dr-curve-toolbar">
                 <div class="dr-curve-tabs" role="group" aria-label="曲线通道选择">
-                  <button type="button" class="is-active" data-curve-ch="master">Master</button>
+                  <button
+                    type="button"
+                    class="is-active"
+                    data-curve-ch="master"
+                    data-i18n="darkroom.curveChMaster"
+                  >
+                    综合明暗
+                  </button>
                   <button type="button" data-curve-ch="red">R</button>
                   <button type="button" data-curve-ch="green">G</button>
                   <button type="button" data-curve-ch="blue">B</button>
                 </div>
-                <button type="button" id="dr-curve-reset" class="dr-curve-reset">Reset</button>
+                <button
+                  type="button"
+                  id="dr-curve-reset"
+                  class="dr-curve-reset"
+                  data-i18n="darkroom.curveReset"
+                >
+                  重置曲线
+                </button>
               </div>
               <canvas
                 id="dr-curve-canvas"
                 class="dr-curve-canvas"
                 width="320"
                 height="200"
-                aria-label="可拖拽单调样条色调曲线编辑器"
+                aria-label="可拖拽色调曲线编辑器"
               ></canvas>
             </div>
 
             <div class="dr-rack-block">
               <h3 class="dr-block-title" data-i18n="darkroom.maskTitle">
-                局部蒙版雕琢 (Drawn & Parametric Mask)
+                局部光影修饰（开启后可直接在左图拖动中心点）
               </h3>
-              <div class="dr-mask-kinds" role="group" aria-label="局部蒙版几何类型">
-                <button type="button" data-mask-kind="none">Off</button>
-                <button type="button" class="is-active" data-mask-kind="ellipse">
-                  椭圆 faceBox
+              <div class="dr-mask-kinds" role="group" aria-label="局部光影形状">
+                <button type="button" data-mask-kind="none" data-i18n="darkroom.maskOff">不启用</button>
+                <button
+                  type="button"
+                  class="is-active"
+                  data-mask-kind="ellipse"
+                  data-i18n="darkroom.maskEllipse"
+                >
+                  人像柔光圈
                 </button>
-                <button type="button" data-mask-kind="gradient">天空渐变</button>
-                <button type="button" data-mask-kind="radial">径向柔光</button>
+                <button type="button" data-mask-kind="gradient" data-i18n="darkroom.maskGradient">
+                  天空压暗渐变
+                </button>
+                <button type="button" data-mask-kind="radial" data-i18n="darkroom.maskRadial">
+                  氛围聚光晕
+                </button>
               </div>
               <div id="dr-mask-sliders" class="dr-sliders-grid dr-mask-sliders">
                 <div class="dr-slider-row">
-                  <label for="dr-sl-mask-ev">Mask EV</label>
+                  <label for="dr-sl-mask-ev" data-i18n="darkroom.maskEv">局部亮度</label>
                   <input id="dr-sl-mask-ev" type="range" min="-120" max="120" value="18" />
                   <output id="dr-val-mask-ev">+0.18 EV</output>
                 </div>
                 <div class="dr-slider-row">
-                  <label for="dr-sl-mask-feather">Feather</label>
+                  <label for="dr-sl-mask-feather" data-i18n="darkroom.maskFeather">边缘柔化</label>
                   <input id="dr-sl-mask-feather" type="range" min="4" max="60" value="22" />
                   <output id="dr-val-mask-feather">0.22</output>
                 </div>
@@ -604,60 +635,57 @@
       </section>
 
       <!-- =====================================================================
-           ACT IV · MULTI-AGENT RETOUCHING ORCHESTRATION
+           ACT IV · SERIES COHESIVE GRADING & RESTRAINT
            ===================================================================== -->
       <section id="agents-section" class="act-section shell-wrap" data-reveal>
         <header class="act-header">
           <div class="act-kicker" data-i18n="agents.chapter">
-            ACT IV · ISOLATED SUB-AGENT ORCHESTRATION
+            第四幕 · 成组统一修图
           </div>
           <h2 class="act-title" data-i18n="agents.title">
-            多 Agent 沙盒协同 · 场景锚点与五步闭环
+            一整组照片色调统一，也懂得何时不修就是最好。
           </h2>
           <p class="act-lead" data-i18n="agents.lead">
-            EditOrchestrator 为每张入选照片拉起独立作用域子 Agent：剥夺 Shell
-            与跨文件读写权限，注入像素级实测诊断（色偏、倾角、人脸框、噪点余量），先行完成场景锚点照片再同步整组基调；原片已臻完美时主动以
-            unchanged 原片直出。
+            就像请来一位细心的老修图师：同一场景先认真修好一张代表作，再把温暖统一的色调顺手延续到同组照片；一旦发现提亮导致灯笼发白过曝，立刻退回改成局部提亮；碰到窗光本来就恰到好处的原片，干脆克制不动，原汁原味交付。
           </p>
         </header>
 
         <div class="agent-top-bar">
           <span class="agent-sandbox-note" data-i18n="agents.sandboxNote">
-            安全边界：子 Agent 经 agent.ctx.tools.restrict 硬隔离，仅见当前任务绑定工具与只读引擎目录。
+            安全安心：修图过程只读取照片与色调参数，绝不擅自乱动电脑里的其他文件夹。
           </span>
           <button type="button" id="agent-replay-btn" class="btn-ghost" data-i18n="agents.playBtn">
-            回放多 Agent 批次协同
+            演示整组照片如何协同修完
           </button>
         </div>
 
         <div id="agent-pipeline-stage" class="agent-pipeline-grid">
-          <div id="agent-task-cards" class="agent-task-cards" role="tablist" aria-label="修图子 Agent 任务队列"></div>
+          <div id="agent-task-cards" class="agent-task-cards" role="tablist" aria-label="成组修图故事列表"></div>
           <div id="agent-inspector-panel" class="agent-inspector-panel"></div>
         </div>
       </section>
 
       <!-- =====================================================================
-           ACT V · GENERATIVE EDITING AUTHORIZATION BOUNDARY
+           ACT V · HONEST AUTHENTICITY & AI BOUNDARY
            ===================================================================== -->
       <section id="boundary-section" class="act-section shell-wrap" data-reveal>
         <header class="act-header">
           <div class="act-kicker" data-i18n="boundary.chapter">
-            ACT V · AUTHENTICITY & FAIL-CLOSED GENERATIVE BOUNDARY
+            第五幕 · 修图与生成的清晰边界
           </div>
           <h2 class="act-title" data-i18n="boundary.title">
-            纪实真实性契约 · 生成式编辑的严苛授权边界
+            日常修图与 AI 生成分得清清楚楚，未经你点头绝不改画面。
           </h2>
           <p class="act-lead" data-i18n="boundary.lead">
-            摄影的力量源于真实。澄影在底层将「纯光学/周围像素传播算法」与「生成式 AI
-            图层」彻底隔离：Agent 绝无权限自行开启生成式重绘，未获人类显式授权一律默认拒绝（Fail-Closed）。
+            调亮光影、顺手擦掉天空里碍眼的电线或杂物，都是基于现场真实像素的日常修复，用起来顺手无阻；但只要涉及“无中生有”用 AI 重绘天空或改变画面内容，澄影一定会先停下来等你确认，并在导出照片信息里诚实注明。
           </p>
         </header>
 
         <div class="auth-stage-grid">
           <div class="auth-visual-card">
-            <div class="auth-mode-tabs" role="group" aria-label="夜航渡口三种编辑真实性层级对比">
+            <div class="auth-mode-tabs" role="group" aria-label="夜航渡口三种处理对比">
               <button type="button" data-auth-mode="original" data-i18n="boundary.modeOrig">
-                ① 只读原片基线 (SHA-256)
+                ① 原始拍摄底片（完好未动）
               </button>
               <button
                 type="button"
@@ -665,10 +693,10 @@
                 data-auth-mode="inpaint"
                 data-i18n="boundary.modeInpaint"
               >
-                ② 确定性去电线 (ai:inpaint · 无需授权)
+                ② 擦除电线杂物（真实像素修补）
               </button>
               <button type="button" data-auth-mode="generative" data-i18n="boundary.modeGen">
-                ③ 生成式天际图层 (edit_generate · 需审批)
+                ③ AI 更换晚霞天空（需你点头同意）
               </button>
             </div>
 
@@ -676,22 +704,22 @@
               <img
                 id="auth-stage-img"
                 src="./photos/07-harbor-inpaint-clean.webp"
-                alt="夜航渡口电线修补与生成式授权边界对比"
+                alt="夜航渡口电线修补与 AI 换天边界对比"
                 width="1440"
                 height="960"
                 loading="lazy"
                 decoding="async"
               />
               <span id="auth-authenticity-pill" class="auth-pill pill-pure"
-                >纪实摄影真实性完整 · NON-GENERATIVE</span
+                >100% 现场实拍光影 · 无 AI 生成内容</span
               >
 
-              <!-- Fail-Closed Gate Overlay when Mode 3 is clicked prior to authorization -->
+              <!-- Confirmation Gate Overlay when Mode 3 is clicked prior to approval -->
               <div id="auth-lock-overlay" class="auth-lock-overlay" hidden>
-                <code>ChengyingError: authorization-required (Fail-Closed v0.8.0)</code>
-                <strong>生成式图层已被核心服务拦截</strong>
-                <p>
-                  普通 edit_apply 被模块私有 Symbol 锁死，无法创建或伪造 ai:gen_layer。必须在右侧点击模拟人类审批「允许一次」后方可写入可回退的生成遮罩层。
+                <span class="auth-lock-tag" data-i18n="boundary.lockTag">安全确认 · 等待你的决定</span>
+                <strong data-i18n="boundary.lockTitle">正在准备用 AI 重绘天空，是否允许？</strong>
+                <p data-i18n="boundary.lockBody">
+                  日常调色和去除电线不会触发这条确认；但更换天空会加入原本没拍到的 AI 画面，只有在你点击右侧按钮确认后才会执行。
                 </p>
               </div>
             </div>
@@ -702,120 +730,175 @@
           <div class="auth-policy-column">
             <div class="auth-action-row">
               <button type="button" id="auth-grant-btn" class="btn-primary">
-                模拟人类点击 DSH 审批「允许一次」
+                我确认允许这次 AI 画面生成
               </button>
               <button type="button" id="auth-revoke-btn" class="btn-ghost" hidden>
-                撤销生成图层并回退修订 (edit_revert)
+                撤回 AI 生成，恢复纯实拍版本
               </button>
             </div>
 
             <div class="auth-rule-cards">
               <div class="auth-rule-item">
-                <h4>1. 私有 Symbol 锁死通用通道</h4>
-                <p>
-                  <code>EditService.applyOps</code> 由私有
-                  <code>Symbol('authorized-generative-flow')</code> 守护，任何子 Agent
-                  试图手搓 JSON 注入或跨任务复制 <code>gen_*</code> 图层均直接拒绝。
+                <h4 data-i18n="boundary.rule1Title">1. 真实修补与 AI 生成严格分开</h4>
+                <p data-i18n="boundary.rule1Desc">
+                  压高光、提暗部、去掉电线或镜头灰点都只基于现场拍到的真实画面；AI 换天等创作功能默认锁住，绝不悄悄偷换你的记忆。
                 </p>
               </div>
               <div class="auth-rule-item">
-                <h4>2. 任务绑定原子收据与 SHA-256 验真</h4>
-                <p>
-                  生成结果仅运行一次并存为 16-bit PNG 遮罩资产，绑定
-                  <code>taskId / authorizationId / assetSha256</code>；每次渲染与导出均复核磁盘哈希，确保预览与终混像素 100% 确定一致。
+                <h4 data-i18n="boundary.rule2Title">2. 改得不好随时一键回到原片</h4>
+                <p data-i18n="boundary.rule2Desc">
+                  AI 生成的画面会保存在单独图层中，原片文件始终只读保护；只要想反悔，随时一键撤回。
                 </p>
               </div>
               <div class="auth-rule-item">
-                <h4>3. IPTC 国际标准溯源与可逆回退</h4>
-                <p>
-                  含生成图层的导出自动写入
-                  <code>compositeWithTrainedAlgorithmicMedia</code>；一旦
-                  <code>edit_revert</code> 撤销该图层，导出即恢复无生成标记的纯净纪实状态。
+                <h4 data-i18n="boundary.rule3Title">3. 导出自带“身份证”，真实含不含 AI 一目了然</h4>
+                <p data-i18n="boundary.rule3Desc">
+                  纯实拍精修和包含 AI 生成的照片在写入文件信息时会清清楚楚区分，方便参加影赛或日常留档溯源。
                 </p>
               </div>
             </div>
 
-            <pre id="auth-meta-inspector" class="auth-meta-pre"></pre>
+            <div id="auth-meta-inspector" class="auth-record-card"></div>
           </div>
         </div>
       </section>
 
       <!-- =====================================================================
-           ACT VI · MULTI-ENGINE COVERAGE & DSH INSTALLATION
+           ACT VI · FORMATS, SENSIBILITIES & QUICK START
            ===================================================================== -->
       <section id="engines-section" class="act-section shell-wrap" data-reveal>
         <header class="act-header">
           <div class="act-kicker" data-i18n="engines.chapter">
-            ACT VI · FULL ENGINE INTROSPECTION & INSTALLATION
+            第六幕 · 支持的设备与三步上手
           </div>
           <h2 class="act-title" data-i18n="engines.title">
-            四阶引擎全量自省 · 不阉割任何一个专业参数
+            相机 RAW 与手机照片开箱即修，三步开启你的数字暗房。
           </h2>
           <p class="act-lead" data-i18n="engines.lead">
-            澄影不维护残缺的“常用滑块白名单”，而是从本机安装的 darktable 与 RawTherapee 动态自省全部
-            174 个算子与 2,448 个 JSON Schema 参数，并以真实 RAW 渲染 + 逐字节/逐键回读完成硬件级校验。
+            无论是平时随手拍的手机 JPG / HEIC / ProRAW，还是索尼、佳能、尼康、富士、徕卡、哈苏等相机的 RAW 原片，装好就能直接选片和调色；若你电脑上已有 Darktable 或 RawTherapee，澄影也能自动联动它们并导出可继续微调的工程文件。
           </p>
         </header>
 
-        <div id="engine-tabs" class="engine-tabs" role="tablist" aria-label="四阶后期引擎覆盖详情"></div>
+        <div id="engine-tabs" class="engine-tabs" role="tablist" aria-label="调色方式与支持说明"></div>
         <div id="engine-detail-box" class="engine-detail-box"></div>
 
-        <h3 class="sub-heading">5 大随包专业摄影后期技能 (Bundled Skills)</h3>
+        <h3 class="sub-heading" data-i18n="engines.skillsHeading">
+          自带 5 份摄影师审美修养，懂构图更懂克制
+        </h3>
         <div id="bundled-skills-grid" class="bundled-skills-grid"></div>
 
-        <h3 class="sub-heading">28 种主流全画幅 / 中画幅 / 手机 CFA RAW 原生接入</h3>
+        <h3 class="sub-heading" data-i18n="engines.formatsHeading">
+          手机日常格式与主流相机 RAW 原片直接支持
+        </h3>
         <div id="raw-formats-strip" class="raw-formats-strip"></div>
 
         <div id="install-anchor">
-          <h3 class="sub-heading" data-i18n="engines.installTitle">接入 DeepSeek Harness 工作台</h3>
-          <div class="install-grid">
-            <div class="terminal-card">
-              <div class="terminal-head">
-                <strong>1. 构建打包并安装至 DSH Web Profile</strong>
-                <button type="button" data-copy-target="cmd-install">复制命令</button>
-              </div>
-              <pre id="cmd-install"><code># 环境要求：Node.js &gt;= 24.9.0，DSH &gt;= 0.2.1-0 &lt; 0.3.0
-# darktable / RawTherapee 为可选增强引擎（未安装时内置 32f 引擎开箱可用）
+          <h3 class="sub-heading" data-i18n="engines.quickstartHeading">怎么开始用？三步就好</h3>
+
+          <div class="quickstart-steps">
+            <article class="qs-step-card">
+              <strong data-i18n="engines.step1Title">第 1 步 · 安装澄影插件</strong>
+              <p data-i18n="engines.step1Desc">
+                在 DeepSeek Harness 里添加澄影插件包，内置暗房引擎开箱即用，无需折腾复杂环境。
+              </p>
+            </article>
+            <article class="qs-step-card">
+              <strong data-i18n="engines.step2Title">第 2 步 · 选择摄影模式</strong>
+              <p data-i18n="engines.step2Desc">
+                新建对话时挑选「澄影 · 摄影后期」预设，即可解锁全部智能选片与温和调色能力。
+              </p>
+            </article>
+            <article class="qs-step-card">
+              <strong data-i18n="engines.step3Title">第 3 步 · 像聊天一样吩咐修图</strong>
+              <p data-i18n="engines.step3Desc">
+                发给它照片目录或选几张样片，直接用大白话告诉它想要的感觉，满意后再整组导出。
+              </p>
+            </article>
+          </div>
+
+          <div class="prompt-examples-wrap">
+            <h4 class="prompt-examples-title" data-i18n="engines.promptsHeading">
+              不知道怎么开口？试试这样对它说：
+            </h4>
+            <div class="prompt-examples-grid">
+              <blockquote class="prompt-quote-card" data-i18n="engines.prompt1">
+                “帮我从刚导入的 200 张旅行照片里，挑出 15 张表情自然、对焦清晰的精选。”
+              </blockquote>
+              <blockquote class="prompt-quote-card" data-i18n="engines.prompt2">
+                “这组夜景人像保留灯笼原本的暖光，把人脸稍微提亮，肤色自然一点别太假。”
+              </blockquote>
+              <blockquote class="prompt-quote-card" data-i18n="engines.prompt3">
+                “按清透胶片的感觉统一修这一整组；原本光线已经很好的照片就保留原片别乱改。”
+              </blockquote>
+            </div>
+          </div>
+
+          <!-- Folded by Default: CLI & Developer Install Commands -->
+          <details class="pro-fold pro-cli-fold" id="pro-cli-details">
+            <summary class="pro-fold-summary" id="pro-cli-summary">
+              <span data-i18n="engines.proCliSummary">
+                展开安装命令与命令行工具（进阶用户 / 开发者）
+              </span>
+            </summary>
+            <div class="pro-fold-body">
+              <div class="install-grid">
+                <div class="terminal-card">
+                  <div class="terminal-head">
+                    <strong data-i18n="engines.card1Title">1. 添加到 DeepSeek Harness 工作台</strong>
+                    <button type="button" data-copy-target="cmd-install" data-i18n="engines.copyBtn">
+                      复制命令
+                    </button>
+                  </div>
+                  <pre id="cmd-install"><code># 环境要求：Node.js &gt;= 24.9.0，DSH &gt;= 0.2.1-0 &lt; 0.3.0
+# darktable / RawTherapee 为可选搭配（未安装时内置暗房开箱可用）
 pnpm install &amp;&amp; pnpm build &amp;&amp; pnpm pack
 dsh plugin --profile web add ./chengying-0.8.0.tgz
 
-# 新建任务时选择预设：「澄影 · 摄影后期」</code></pre>
-            </div>
+# 新建对话时选择预设：「澄影 · 摄影后期」</code></pre>
+                </div>
 
-            <div class="terminal-card">
-              <div class="terminal-head">
-                <strong>2. 独立 CLI 引擎健康度自检与快速筛图</strong>
-                <button type="button" data-copy-target="cmd-cli">复制命令</button>
-              </div>
-              <pre id="cmd-cli"><code># 真实渲染 48x32 测试帧诊断各引擎健康状态
+                <div class="terminal-card">
+                  <div class="terminal-head">
+                    <strong data-i18n="engines.card2Title">2. 可选命令行工具快捷指令</strong>
+                    <button type="button" data-copy-target="cmd-cli" data-i18n="engines.copyBtn">
+                      复制命令
+                    </button>
+                  </div>
+                  <pre id="cmd-cli"><code># 检测本机暗房与可选引擎状态
 chengying engines doctor
 
-# 命令行直接对照片目录执行特征筛图与自然语言选片
+# 命令行直接对照片目录执行筛图与自然语言选片
 chengying cull /Volumes/Photos/2026-expedition
 chengying select /Volumes/Photos/2026-expedition "按行程叙事选 30 张代表作"</code></pre>
+                </div>
+              </div>
             </div>
-          </div>
+          </details>
         </div>
       </section>
     </main>
 
     <footer class="site-footer">
       <div class="shell-wrap footer-inner">
-        <div>
-          <strong>澄影 Chengying v0.8.0</strong> · DeepSeek Harness 专业摄影后期工作流插件 · 原片只读 ·
-          非破坏式可逆修订
+        <div data-i18n="footer.tagline">
+          澄影 Chengying v0.8.0 · 让每一张照片自然耐看 · 原片始终完好，调整随时可退回
         </div>
         <div class="footer-links">
-          <a href="https://github.com/IGNGserver/chengying" target="_blank" rel="noopener noreferrer"
-            >GitHub 仓库</a
+          <a
+            href="https://github.com/IGNGserver/chengying"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-i18n="footer.repoLink"
+            >GitHub 开源仓库</a
           >
           <a
             href="https://github.com/IGNGserver/chengying/releases"
             target="_blank"
             rel="noopener noreferrer"
-            >Releases 发行版</a
+            data-i18n="footer.releasesLink"
+            >下载插件安装包</a
           >
-          <a href="#hero-stage">返回首幕 ↑</a>
+          <a href="#hero-stage" data-i18n="footer.backToTop">回到顶部 ↑</a>
         </div>
       </div>
     </footer>

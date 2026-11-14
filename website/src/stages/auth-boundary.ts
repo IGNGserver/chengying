@@ -7,7 +7,6 @@ export class AuthBoundaryController {
   private lang: Lang = 'zh'
   private mode: AuthMode = 'inpaint'
   private isAuthorized = false
-  private authGrantId = 'auth_08f2c91a'
 
   public mount(lang: Lang): void {
     this.lang = lang
@@ -56,7 +55,7 @@ export class AuthBoundaryController {
     const grantBtn = document.getElementById('auth-grant-btn') as HTMLButtonElement | null
     const revokeBtn = document.getElementById('auth-revoke-btn') as HTMLButtonElement | null
     const bannerEl = document.getElementById('auth-status-banner')
-    const metaPre = document.getElementById('auth-meta-inspector')
+    const metaBox = document.getElementById('auth-meta-inspector')
     const badgeEl = document.getElementById('auth-authenticity-pill')
 
     const showGenerativePixels = this.mode === 'generative' && this.isAuthorized
@@ -93,73 +92,125 @@ export class AuthBoundaryController {
       } else if (this.mode === 'inpaint') {
         bannerEl.textContent =
           this.lang === 'zh'
-            ? '确定性非生成式修补 (ai:inpaint · Telea 2004)：仅将灯柱上方周围真实夜空像素向内行进传播，无虚构内容，无需生成授权。'
-            : 'Deterministic Non-Generative Healing (ai:inpaint · Telea 2004): Propagates surrounding real sky pixels to remove utility wires; invents zero content.'
+            ? '基于周围夜空像素自然填补：仅轻轻抹除上空杂乱电线，没有添加任何虚拟画面，可顺畅直接完成。'
+            : 'Surrounding-pixel cleanup: neatly removes distracting overhead wires using real night sky pixels—no approval hurdle needed.'
       } else {
         bannerEl.textContent =
           this.lang === 'zh'
-            ? '只读原片基线 (FsGuard + originals_baseline)：原始 ARW 文件受路径守卫硬保护，任何工具写入原片路径直接抛出 permission-denied。'
-            : 'Read-Only Original Baseline (FsGuard + originals_baseline): Source ARW is write-locked; any attempt to overwrite throws permission-denied.'
+            ? '保留按下快门那一刻的完整原片：只读保护，不会覆盖或删改原始照片文件。'
+            : 'Original capture untouched: read-only protection guarantees your source photo is never overwritten.'
       }
     }
 
     if (badgeEl) {
       if (showGenerativePixels) {
         badgeEl.className = 'auth-pill pill-gen'
-        badgeEl.textContent = 'IPTC: compositeWithTrainedAlgorithmicMedia'
+        badgeEl.textContent =
+          this.lang === 'zh'
+            ? '已含 AI 生成天空 · 导出将如实注明'
+            : 'Includes AI Sky Layer · Honestly Noted'
       } else {
         badgeEl.className = 'auth-pill pill-pure'
         badgeEl.textContent =
-          this.lang === 'zh' ? '纪实摄影真实性完整 · NON-GENERATIVE' : 'DOCUMENTARY AUTHENTIC · NON-GENERATIVE'
+          this.lang === 'zh'
+            ? '100% 现场实拍光影 · 无 AI 生成内容'
+            : '100% Real Capture · Non-Generative'
       }
     }
 
-    if (metaPre) {
-      if (this.mode === 'generative' && !this.isAuthorized) {
-        metaPre.textContent = `// EditService.applyOps & acquireGenerative (Fail-Closed v0.8.0)
-ChengyingError: authorization-required
-  shotId: "shot_29d" (DSC0604.ARW)
-  attemptedOp: "ai:gen_layer" (kind: "replace", mask: "upper-sky")
-  requireApproval: true
-  GENERATIVE_FLOW_SYMBOL: Symbol(authorized-generative-flow) // private lock
-  result: BLOCKED — Agent cannot self-grant generative authorizations.`
-      } else if (showGenerativePixels) {
-        metaPre.textContent = `{
-  "deliverySchema": "chengying-delivery/1",
-  "file": "DSC0604_rendered.jpg",
-  "originalsIntact": true,
-  "generative": true,
-  "authorization": {
-    "id": "${this.authGrantId}",
-    "grantedBy": "user (DSH approval prompt)",
-    "taskId": "task_29d",
-    "maxUses": 1,
-    "uses": 1
-  },
-  "generatedAssetReceipt": {
-    "layerFormat": "16-bit PNG masked layer",
-    "assetSha256": "e83c49b0...71d2 (verified before render)"
-  },
-  "xmpWritten": {
-    "XMP-iptcExt:DigitalSourceType": "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia",
-    "ExifVerifiedTags": "20/20 passed"
-  }
-}`
-      } else {
-        metaPre.textContent = `{
-  "deliverySchema": "chengying-delivery/1",
-  "file": "DSC0604_rendered.jpg",
-  "originalsIntact": true,
-  "generative": false,
-  "stage": "${this.mode === 'inpaint' ? 'ai:inpaint (Telea surrounding-pixel heal)' : 'originals_baseline (read-only)'}",
-  "authorizationRequired": false,
-  "xmpWritten": {
-    "CreatorTool": "Chengying 0.8.0 (DeepSeek Harness)",
-    "DigitalSourceType": "(omitted — pure optical/non-generative)",
-    "ExifVerifiedTags": "20/20 passed (DateTimeOriginal, SubSec, GPS, Lens)"
-  }
-}`
-      }
+    if (metaBox) {
+      const zh = this.lang === 'zh'
+      const rows =
+        this.mode === 'generative' && !this.isAuthorized
+          ? [
+              {
+                label: zh ? '拍摄原片' : 'Original File',
+                val: zh ? 'DSC0604.ARW · 完好保留未动' : 'DSC0604.ARW · Untouched & Safe',
+              },
+              {
+                label: zh ? '当前状态' : 'Status',
+                val: zh
+                  ? '等待你的确认 — AI 更换天空暂未执行'
+                  : 'Waiting for your confirmation — AI sky swap paused',
+              },
+              {
+                label: zh ? '为什么拦住' : 'Why Paused',
+                val: zh
+                  ? '更换天空会改变实拍画面，必须由你亲自点头'
+                  : 'Swapping the sky invents new content and requires your explicit yes',
+              },
+              {
+                label: zh ? '拍摄信息' : 'Camera Info',
+                val: zh ? '时间、地点与镜头信息完整随附' : 'Date, location, camera & lens preserved',
+              },
+            ]
+          : showGenerativePixels
+            ? [
+                {
+                  label: zh ? '拍摄原片' : 'Original File',
+                  val: zh ? 'DSC0604.ARW · 完好保留，随时可恢复' : 'DSC0604.ARW · Untouched, reversible anytime',
+                },
+                {
+                  label: zh ? '当前处理' : 'Active Edit',
+                  val: zh
+                    ? 'AI 晚霞天空已保存为独立图层（经你本次确认）'
+                    : 'AI sunset sky placed on a separate reversible layer (approved)',
+                },
+                {
+                  label: zh ? '照片真实声明' : 'Truth Tag',
+                  val: zh
+                    ? '导出照片已自动标注「包含 AI 生成天空」'
+                    : 'Export honestly marked as “Includes AI-generated sky”',
+                },
+                {
+                  label: zh ? '拍摄信息' : 'Camera Info',
+                  val: zh ? '时间、地点、光圈快门等原片记忆全部留存' : 'Date, GPS, camera & lens metadata preserved',
+                },
+              ]
+            : [
+                {
+                  label: zh ? '拍摄原片' : 'Original File',
+                  val: zh ? 'DSC0604.ARW · 完好保留未作修改' : 'DSC0604.ARW · Read-only & completely safe',
+                },
+                {
+                  label: zh ? '当前处理' : 'Active Edit',
+                  val:
+                    this.mode === 'inpaint'
+                      ? zh
+                        ? '使用周围真实夜空像素擦除电线（非 AI 生成）'
+                        : 'Wires healed using surrounding real sky pixels (non-generative)'
+                      : zh
+                        ? '未经修饰的原始拍摄底片'
+                        : 'Untouched original camera photo',
+                },
+                {
+                  label: zh ? '照片真实声明' : 'Truth Tag',
+                  val: zh
+                    ? '纯实拍画面 · 不含任何 AI 生成内容'
+                    : 'Pure real capture · Zero AI-generated pixels',
+                },
+                {
+                  label: zh ? '拍摄信息' : 'Camera Info',
+                  val: zh ? '时间、地点、相机镜头信息完整留存' : 'Date, location, camera & lens preserved intact',
+                },
+              ]
+
+      const headerTitle = zh ? '这张照片的真实性与信息档案' : 'Photo Honesty & Metadata Record'
+      metaBox.innerHTML = `
+        <div class="auth-rec-title">${headerTitle}</div>
+        <dl class="auth-rec-list">
+          ${rows
+            .map(
+              (r) => `
+            <div class="auth-rec-row">
+              <dt>${r.label}</dt>
+              <dd>${r.val}</dd>
+            </div>
+          `,
+            )
+            .join('')}
+        </dl>
+      `
     }
   }
 }

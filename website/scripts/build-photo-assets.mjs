@@ -49,6 +49,48 @@ async function buildSensorNeutralRaw(inputPath, outPath, width, height, opts = {
     .toFile(outPath)
 }
 
+async function buildOgCard(heroSourcePath) {
+  const heroMasterBuf = await sharp(heroSourcePath)
+    .resize(1200, 630, { fit: 'cover', position: 'centre' })
+    .toBuffer()
+
+  const heroRawHalfBuf = await sharp(heroSourcePath)
+    .resize(1200, 630, { fit: 'cover', position: 'centre' })
+    .extract({ left: 0, top: 0, width: 460, height: 630 })
+    .modulate({ brightness: 0.74, saturation: 0.54 })
+    .linear([0.78, 0.84, 0.94], [18, 20, 24])
+    .toBuffer()
+
+  const ogOverlaySvg = Buffer.from(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+      <defs>
+        <linearGradient id="vignette" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#09090b" stop-opacity="0.58"/>
+          <stop offset="46%" stop-color="#09090b" stop-opacity="0.14"/>
+          <stop offset="100%" stop-color="#09090b" stop-opacity="0.86"/>
+        </linearGradient>
+      </defs>
+      <rect width="1200" height="630" fill="url(#vignette)"/>
+      <line x1="460" y1="0" x2="460" y2="630" stroke="#e8c284" stroke-width="2" stroke-opacity="0.88"/>
+      <circle cx="460" cy="315" r="18" fill="#0d0d11" fill-opacity="0.85" stroke="#e8c284" stroke-width="1.6"/>
+      <path d="M454 315 L458 311 M454 315 L458 319 M466 315 L462 311 M466 315 L462 319" stroke="#f2ede4" stroke-width="1.5" stroke-linecap="round"/>
+      <text x="56" y="54" fill="#c7bfb2" font-family="-apple-system, 'PingFang SC', 'Noto Sans CJK SC', sans-serif" font-size="16" letter-spacing="1.5">拍摄原片 · 完整保留</text>
+      <text x="484" y="54" fill="#e8c284" font-family="-apple-system, 'PingFang SC', 'Noto Sans CJK SC', sans-serif" font-size="16" letter-spacing="1.5">澄影精修 · 自然耐看</text>
+      <text x="56" y="516" fill="#f5f0e6" font-family="Georgia, 'Songti SC', serif" font-size="54" font-weight="600" letter-spacing="2">澄影 · Chengying</text>
+      <text x="56" y="564" fill="#d3cbc0" font-family="-apple-system, 'PingFang SC', 'Noto Sans CJK SC', sans-serif" font-size="24" letter-spacing="1">留下旅途最好的瞬间 · 智能选片与自然光影精修</text>
+      <text x="56" y="598" fill="#9d9589" font-family="-apple-system, sans-serif" font-size="14" letter-spacing="1.5">SMART CULLING · NATURAL PHOTO DEVELOPING · UNTOUCHED ORIGINALS</text>
+    </svg>
+  `)
+
+  await sharp(heroMasterBuf)
+    .composite([
+      { input: heroRawHalfBuf, left: 0, top: 0 },
+      { input: ogOverlaySvg, left: 0, top: 0 },
+    ])
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toFile(path.join(OG_DIR, 'og.jpg'))
+}
+
 async function main() {
   fs.mkdirSync(PHOTOS_DIR, { recursive: true })
   fs.mkdirSync(THUMBS_DIR, { recursive: true })
@@ -58,7 +100,8 @@ async function main() {
   if (!firstCheck) {
     const existingHero = path.join(PHOTOS_DIR, '01-alpine-dawn.webp')
     if (fs.existsSync(existingHero)) {
-      console.log('[assets] Production WebP plates already present in public/photos — verified.')
+      await buildOgCard(existingHero)
+      console.log('[assets] Production WebP plates present; regenerated OG card from hero plate.')
       return
     }
     throw new Error(`No source captures found in ${RAW_DIR} and public/photos is empty.`)
@@ -280,45 +323,7 @@ async function main() {
     .toFile(path.join(PUBLIC_DIR, 'apple-touch-icon.png'))
 
   // Build 1200x630 OpenGraph Gallery Card (og/og.jpg)
-  const heroMasterBuf = await sharp(resolveSourceFile('01_alpine_dawn'))
-    .resize(1200, 630, { fit: 'cover', position: 'centre' })
-    .toBuffer()
-
-  const heroRawHalfBuf = await sharp(resolveSourceFile('01_alpine_dawn'))
-    .resize(1200, 630, { fit: 'cover', position: 'centre' })
-    .extract({ left: 0, top: 0, width: 460, height: 630 })
-    .modulate({ brightness: 0.74, saturation: 0.54 })
-    .linear([0.78, 0.84, 0.94], [18, 20, 24])
-    .toBuffer()
-
-  const ogOverlaySvg = Buffer.from(`
-    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-      <defs>
-        <linearGradient id="vignette" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#09090b" stop-opacity="0.58"/>
-          <stop offset="46%" stop-color="#09090b" stop-opacity="0.14"/>
-          <stop offset="100%" stop-color="#09090b" stop-opacity="0.86"/>
-        </linearGradient>
-      </defs>
-      <rect width="1200" height="630" fill="url(#vignette)"/>
-      <line x1="460" y1="0" x2="460" y2="630" stroke="#e8c284" stroke-width="2" stroke-opacity="0.88"/>
-      <circle cx="460" cy="315" r="18" fill="#0d0d11" fill-opacity="0.85" stroke="#e8c284" stroke-width="1.6"/>
-      <path d="M454 315 L458 311 M454 315 L458 319 M466 315 L462 311 M466 315 L462 319" stroke="#f2ede4" stroke-width="1.5" stroke-linecap="round"/>
-      <text x="56" y="54" fill="#c7bfb2" font-family="monospace" font-size="15" letter-spacing="2">RAW LINEAR · 14-BIT ARW</text>
-      <text x="484" y="54" fill="#e8c284" font-family="monospace" font-size="15" letter-spacing="2">CHENGYING SCENE-REFERRED · REV #3</text>
-      <text x="56" y="520" fill="#f5f0e6" font-family="Georgia, 'Songti SC', serif" font-size="54" font-weight="600" letter-spacing="2">澄影 · Chengying</text>
-      <text x="56" y="566" fill="#d3cbc0" font-family="-apple-system, 'PingFang SC', sans-serif" font-size="22" letter-spacing="1">AI 筛图 · 非破坏式数字暗房 · 多 Agent 协同修图工作流（DeepSeek Harness 插件）</text>
-      <text x="56" y="598" fill="#9d9589" font-family="monospace" font-size="14" letter-spacing="1.5">READ-ONLY ORIGINALS · DARKTABLE / RAWTHERAPEE FULL INTROSPECTION · FAIL-CLOSED GENERATIVE AUTH</text>
-    </svg>
-  `)
-
-  await sharp(heroMasterBuf)
-    .composite([
-      { input: heroRawHalfBuf, left: 0, top: 0 },
-      { input: ogOverlaySvg, left: 0, top: 0 },
-    ])
-    .jpeg({ quality: 88, mozjpeg: true })
-    .toFile(path.join(OG_DIR, 'og.jpg'))
+  await buildOgCard(resolveSourceFile('01_alpine_dawn'))
 
   console.log('[assets] Successfully built all gallery WebP plates, contact sheet frames, face insets, and OG imagery.')
 }

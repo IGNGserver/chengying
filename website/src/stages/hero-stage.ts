@@ -202,18 +202,19 @@ export class HeroStageController {
       this.sliderInput.value = String(Math.round(split * 100))
     }
 
-    // Update live blended photometric readout based on curtain reveal ratio (1 - split = master share)
+    // Update live color warmth & split percentage readout (1 - split = graded share)
     const masterWeight = 1 - split
     const r = this.currentPlate.rawStats
     const g = this.currentPlate.gradedStats
-    const p05 = Math.round(r.p05 + (g.p05 - r.p05) * masterWeight)
-    const p50 = Math.round(r.p50 + (g.p50 - r.p50) * masterWeight)
-    const p95 = Math.round(r.p95 + (g.p95 - r.p95) * masterWeight)
     const tempK = Math.round(r.tempK + (g.tempK - r.tempK) * masterWeight)
+    const gradedPct = Math.round(masterWeight * 100)
 
     const statsEl = document.getElementById('hero-live-stats')
     if (statsEl) {
-      statsEl.textContent = `p05 ${String(p05).padStart(2, '0')} · p50 ${String(p50).padStart(3, '0')} · p95 ${String(p95).padStart(3, '0')} · ${tempK}K · ΔRAW ${(masterWeight * 100).toFixed(0)}%`
+      statsEl.textContent =
+        this.lang === 'zh'
+          ? `色温 ${tempK}K · 右侧精修画面占 ${gradedPct}%`
+          : `Warmth ${tempK}K · Graded View ${gradedPct}%`
     }
   }
 
@@ -223,11 +224,16 @@ export class HeroStageController {
       const el = document.getElementById(id)
       if (el) el.textContent = text
     }
-    set('hero-frame-code', `FRAME ${p.frameNo} · ${p.fileCode}`)
+    set(
+      'hero-frame-code',
+      this.lang === 'zh'
+        ? `第 ${p.frameNo} 格 · ${tText(p.formatBadge, this.lang)}`
+        : `Frame ${p.frameNo} · ${tText(p.formatBadge, this.lang)}`,
+    )
     set('hero-plate-title', tText(p.title, this.lang))
     set('hero-plate-loc', tText(p.location, this.lang))
     set('hero-plate-exif', p.exif)
-    set('hero-plate-sha', p.sha256Short)
+    set('hero-plate-sha', tText(p.originalStatus, this.lang))
     set('hero-plate-recipe', tText(p.recipeSummary, this.lang))
     this.applySplitDom(this.currentSplit)
   }

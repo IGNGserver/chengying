@@ -2,7 +2,7 @@
   "name": "chengying-website",
   "private": true,
   "version": "0.8.0",
-  "description": "澄影 Chengying 官方网站 — AI 摄影后期、非破坏式数字暗房与多 Agent 协同工作流（DeepSeek Harness 插件）",
+  "description": "澄影 Chengying 官方网站 — 面向摄影爱好者的智能选片与自然光影精修助手（DeepSeek Harness 插件）",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "engines": {

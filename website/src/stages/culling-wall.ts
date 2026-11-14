@@ -45,9 +45,9 @@ export class CullingWallController {
 
     this.gridEl.innerHTML = CULLING_FRAMES.map((frame) => {
       const faceInsetHtml = frame.faceInsetSrc
-        ? `<div class="cull-face-inset" title="1:1 Face Zoom Inset (#ffd54f)">
+        ? `<div class="cull-face-inset" title="${this.lang === 'zh' ? '放大核对人物眼睛与表情' : 'Close-up check on eyes and expression'}">
              <img src="${frame.faceInsetSrc}" alt="1:1 face zoom ${frame.frameNo}" loading="lazy" decoding="async" />
-             <span>1:1 EYE</span>
+             <span>${this.lang === 'zh' ? '眼睛特写' : 'Eye Zoom'}</span>
            </div>`
         : ''
 
@@ -82,8 +82,8 @@ export class CullingWallController {
             ${
               !frame.isPick
                 ? `<div class="cull-reject-stamp">
-                     <span>FLAG: REJECT</span>
-                     <small>${this.lang === 'zh' ? '原文件保留 · 0 字节改动' : 'Original Kept · 0 Bytes Altered'}</small>
+                     <span>${this.lang === 'zh' ? '已挑出放回' : 'Set Aside'}</span>
+                     <small>${this.lang === 'zh' ? '原片完整保留 · 绝不删除' : 'Original kept safe · Never deleted'}</small>
                    </div>`
                 : ''
             }
@@ -94,7 +94,7 @@ export class CullingWallController {
               <span class="cull-filename">${frame.fileName}</span>
               <span class="cull-exif">${frame.exifShort}</span>
             </div>
-            <div class="cull-mono-diag">${frame.diagnosticMono}</div>
+            <div class="cull-mono-diag">${tText(frame.diagnosticNote, this.lang)}</div>
             <p class="cull-narrative-caption">
               <strong>${tText(frame.segmentTitle, this.lang)}</strong> — ${tText(frame.caption, this.lang)}
             </p>
@@ -296,25 +296,34 @@ export class CullingWallController {
       this.countStatsEl.textContent =
         this.stageMode === 'narrative'
           ? this.lang === 'zh'
-            ? `已从 24 帧连拍原片中叙事精选 ${visibleCount} 帧 · 淘汰帧 0 字节删除`
-            : `Curated ${visibleCount} narrative frames from 24 captures · 0 bytes deleted`
+            ? `已从 24 张连拍里挑出 ${visibleCount} 张精选 · 其余原片一张未删`
+            : `Selected ${visibleCount} story keepers from 24 shots · 0 files deleted`
           : this.lang === 'zh'
-            ? `底片台共 24 帧 (8 组连拍 · 入选候选 ${pickCount} 帧 · 原片 SHA-256 锁定)`
-            : `Light table: 24 frames (8 burst groups · ${pickCount} picks · SHA-256 locked)`
+            ? `底片台展示全部 24 张拍回原片（8 组连拍 · 其中 ${pickCount} 张推荐候选）`
+            : `Showing all 24 captured photos (8 burst groups · ${pickCount} top keepers)`
     }
 
     if (this.cliOutputEl) {
-      const cmdMap: Record<NlFilterMode, string> = {
-        all: 'chengying cull ./2026-expedition  # -> 24 shots, 8 groups (exact/near/scene), originalsIntact=true',
-        narrative:
-          'photo_select({ request: "按行程叙事选 8 张代表作", diversity: 0.42, narrative: true })  # -> MMR 4 segments, 8 picks',
-        portrait:
-          'photo_select({ request: "优先人像与手作人文，排除闭眼和糊片", preferTags: ["portrait","craft"] })  # -> 3 picks',
-        potential:
-          'photo_select({ request: "高动态余量风光，92 分以上", minScore: 92, requireTags: ["landscape"] })  # -> 4 picks',
+      const summaryMap: Record<NlFilterMode, { zh: string; en: string }> = {
+        all: {
+          zh: '已自动认出 8 组连拍，挑出闭眼、手抖、跑焦与重复拷贝，帮你留下最稳的画面',
+          en: 'Automatically grouped 8 burst sets, spotting blinks, shake blur, missed focus & duplicates',
+        },
+        narrative: {
+          zh: '已按雪山、列车、茶乡与海岸旅程节奏，精挑出 8 张最有故事感的代表作',
+          en: 'Curated 8 highlights from pass to coast so your album tells the whole journey smoothly',
+        },
+        portrait: {
+          zh: '已按「人像与手作温度」筛选出眼神光清澈、人物神态最自然的 3 张照片',
+          en: 'Filtered 3 keepers with bright eye catchlights, relaxed expressions, and warm craft texture',
+        },
+        potential: {
+          zh: '已筛选出明暗层次丰富、天空与阴影都耐看的高分风光佳作（4 张）',
+          en: 'Filtered 4 scenic favorites with clean skies and deep shadow detail (score 92+)',
+        },
       }
       const key = this.stageMode === 'narrative' ? this.nlMode : 'all'
-      this.cliOutputEl.textContent = cmdMap[key]
+      this.cliOutputEl.textContent = tText(summaryMap[key], this.lang)
     }
   }
 
@@ -344,8 +353,8 @@ export class CullingWallController {
     const members = CULLING_FRAMES.filter((f) => f.groupCode === this.activeModalGroup)
     title.textContent =
       this.lang === 'zh'
-        ? `连拍组 ${this.activeModalGroup} 同表像素与视觉复核 (${members.length} 帧)`
-        : `Burst Group ${this.activeModalGroup} Side-by-Side Pixel & VLM Review (${members.length} frames)`
+        ? `第 ${this.activeModalGroup} 组连拍放大细看（共 ${members.length} 张 · 对比谁眼神最自然）`
+        : `Burst Group ${this.activeModalGroup} Close-Up Comparison (${members.length} frames)`
 
     body.innerHTML = members
       .map(
@@ -357,7 +366,7 @@ export class CullingWallController {
             m.faceInsetSrc
               ? `<div class="burst-face-zoom">
                    <img src="${m.faceInsetSrc}" alt="1:1 eye zoom" />
-                   <span>1:1 Face Zoom (#ffd54f)</span>
+                   <span>${this.lang === 'zh' ? '1:1 眼睛特写' : '1:1 Eye Detail'}</span>
                  </div>`
               : ''
           }
@@ -367,12 +376,12 @@ export class CullingWallController {
             <strong>#${m.frameNo} · ${m.fileName}</strong>
             <span class="burst-badge ${m.isPick ? 'win' : 'rej'}">${tText(m.defectBadge, this.lang)}</span>
           </div>
-          <code>${m.diagnosticMono} · ${m.exifShort}</code>
+          <code>${tText(m.diagnosticNote, this.lang)} · ${m.exifShort}</code>
           <div class="burst-score-bars">
-            <span>Tech ${m.scores.technical}</span>
-            <span>Aesth ${m.scores.aesthetic}</span>
-            <span>Story ${m.scores.story}</span>
-            <span>RAW Pot. ${m.scores.potential}</span>
+            <span>${this.lang === 'zh' ? '清晰度' : 'Clarity'} ${m.scores.technical}</span>
+            <span>${this.lang === 'zh' ? '画面美感' : 'Beauty'} ${m.scores.aesthetic}</span>
+            <span>${this.lang === 'zh' ? '故事感' : 'Story'} ${m.scores.story}</span>
+            <span>${this.lang === 'zh' ? '光影余量' : 'Detail'} ${m.scores.potential}</span>
           </div>
           <p>${tText(m.caption, this.lang)}</p>
         </div>
