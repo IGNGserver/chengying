@@ -2,6 +2,7 @@
 
 澄影（Chengying）产品官方网站，位于产品主仓库 `website/` 目录，完整呈现澄影面向 **DeepSeek Harness（DSH）** 的 AI 摄影筛图、非破坏式线性光数字暗房、RAW 多引擎自省架构、多 Agent 沙盒协同工作流与默认拒绝（Fail-Closed）的生成式授权边界。
 
+- 正式站点：<https://chengying.igng.net/>
 - 产品仓库：<https://github.com/IGNGserver/chengying>
 - 当前对应版本：`v0.8.0`
 
@@ -14,9 +15,9 @@
 5. **纪实真实性与生成式授权边界**：三态实拍对比演示只读原片基线、无需授权的确定性周围像素修补（`ai:inpaint` 去电线），以及受私有 Symbol 与任务绑定原子收据锁死的生成式图层（`edit_generate` → `ai:gen_layer`）和 `XMP-iptcExt:DigitalSourceType = compositeWithTrainedAlgorithmicMedia` 溯源写入/撤销闭环。
 6. **四阶引擎全量覆盖矩阵**：详实展示 `darktable`（93 模块 / 738 参数）、`RawTherapee`（54 工具 / 1,593 参数）、`builtin`（23 算子 / 95 参数）与 `ai`（4 算子 / 22 参数）的实测覆盖数据与自省原理，自托管可变字体（Cormorant / Plus Jakarta Sans / JetBrains Mono），零外部 CDN 依赖。
 
-## 开发与验证（遵循本机构建区规范）
+## 开发、验证与线上托管
 
-所有依赖安装、打包构建与 Playwright 浏览器验证均在 `$BUILD_SCRATCH_ROOT` 本机盘副本中执行，绝不在项目工作区生成 `node_modules/` 或 `dist/`（详见 [`docs/WORKSPACE.md`](docs/WORKSPACE.md) 与 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）：
+所有本地依赖安装、打包构建与 Playwright 浏览器验证均在 `$BUILD_SCRATCH_ROOT` 本机盘副本中执行，绝不在项目工作区生成 `node_modules/` 或 `dist/`；线上由 `.github/workflows/website.yml` 自动部署至 Cloudflare Pages（详见 [`docs/WORKSPACE.md`](docs/WORKSPACE.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 与 [`docs/HOSTING.md`](docs/HOSTING.md)）：
 
 ```bash
 WT=~/项目/.wt/影视后期插件/<slug>

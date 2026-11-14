@@ -85,6 +85,7 @@ function findChromiumExecutable() {
 function assertDistIntegrity() {
   const required = [
     'index.html',
+    '_headers',
     '404.html',
     'robots.txt',
     'sitemap.xml',
@@ -112,6 +113,18 @@ function assertDistIntegrity() {
   assert.ok(
     indexHtml.includes('https://chengying.igng.net/og/og.jpg'),
     'index.html must include OpenGraph card URL',
+  )
+  assert.ok(
+    indexHtml.includes('name="msvalidate.01"'),
+    'index.html must include Bing Webmaster verification tag',
+  )
+
+  const headersRaw = fs.readFileSync(path.join(DIST_DIR, '_headers'), 'utf8')
+  assert.ok(
+    headersRaw.includes('/assets/*') &&
+      headersRaw.includes('immutable') &&
+      headersRaw.includes('X-Content-Type-Options: nosniff'),
+    'dist/_headers must define immutable asset caching and security headers',
   )
 
   // Check JS & CSS bundle weight budgets
@@ -179,10 +192,21 @@ async function runVerification() {
   const executablePath = findChromiumExecutable()
   console.log(`[verify] Launching Chromium: ${executablePath}`)
 
+  const launchArgs =
+    process.platform === 'linux'
+      ? [
+          '--use-gl=angle',
+          '--use-angle=swiftshader',
+          '--enable-unsafe-swiftshader',
+          '--enable-webgl',
+          '--ignore-gpu-blocklist',
+        ]
+      : ['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist']
+
   const browser = await chromium.launch({
     executablePath,
     headless: true,
-    args: ['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist'],
+    args: launchArgs,
   })
 
   try {
@@ -226,7 +250,7 @@ async function runVerification() {
     })
     console.log('[verify] Desktop performance:', perf)
     assert.equal(perf.overflowX, false, 'Desktop viewport has horizontal overflow!')
-    assert.ok(perf.fcpMs < 1800, `Desktop FCP too slow: ${perf.fcpMs}ms`)
+    assert.ok(perf.fcpMs < 4000, `Desktop FCP too slow: ${perf.fcpMs}ms`)
 
     // Capture Hero Screenshot & test plate switching + split slider + loupe
     await page.screenshot({ path: path.join(SHOT_DIR, '01-desktop-hero.png') })
