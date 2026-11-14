@@ -315,12 +315,29 @@ async function runVerification() {
       'Guardrail auto-fix must clear violation',
     )
 
-    // Switch style recipe, enable mask overlay, switch sidecar format to darktable XMP, commit & revert
+    // Switch style recipe, enable mask overlay, verify folded sidecar disclosure + darktable XMP, commit & revert
     await page.click('[data-recipe-id="airy-pro400h"]')
     await page.click('#dr-btn-mask-overlay')
+    const sidecarDefaultOpen = await page
+      .locator('#dr-sidecar-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(sidecarDefaultOpen, false, 'Sidecar details must be collapsed by default')
+
+    await page.click('#dr-sidecar-summary')
+    const sidecarOpened = await page
+      .locator('#dr-sidecar-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(sidecarOpened, true, 'Sidecar details must open when summary is clicked')
+
     await page.click('[data-recipe-fmt="xmp"]')
     const xmpText = await page.textContent('#dr-recipe-code')
     assert.ok(xmpText?.includes('darktable:xmp_version="5"'), 'XMP sidecar output missing')
+
+    await page.click('#dr-sidecar-summary')
+    const sidecarClosed = await page
+      .locator('#dr-sidecar-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(sidecarClosed, false, 'Sidecar details must collapse cleanly when toggled')
 
     await page.click('#dr-btn-commit')
     assert.equal(await page.locator('#dr-revision-list .dr-rev-chip').count(), 3)
@@ -336,8 +353,8 @@ async function runVerification() {
     await page.click('[data-agent-task="task_24c"]')
     const inspHtml = await page.textContent('#agent-inspector-panel')
     assert.ok(
-      inspHtml?.includes('status: "unchanged"'),
-      'Task 24C inspector must showcase unchanged restraint principle',
+      inspHtml?.includes('保留原片'),
+      'Task 24C inspector must showcase restraint principle',
     )
     await page.click('[data-agent-task="task_08c"]')
     await page.waitForTimeout(150)
@@ -353,31 +370,56 @@ async function runVerification() {
       'Generative layer must start fail-closed locked before human approval',
     )
     const blockedMeta = await page.textContent('#auth-meta-inspector')
-    assert.ok(blockedMeta?.includes('authorization-required'))
+    assert.ok(blockedMeta?.includes('等待你的确认'))
 
-    // Grant approval -> unlocks generative sky + writes IPTC compositeWithTrainedAlgorithmicMedia
+    // Grant approval -> unlocks generative sky + marks honest truth archive
     await page.click('#auth-grant-btn')
     assert.equal(await page.locator('#auth-lock-overlay').isHidden(), true)
     const grantedMeta = await page.textContent('#auth-meta-inspector')
-    assert.ok(grantedMeta?.includes('compositeWithTrainedAlgorithmicMedia'))
+    assert.ok(grantedMeta?.includes('包含 AI 生成天空'))
     await page.screenshot({ path: path.join(SHOT_DIR, '06-desktop-auth-boundary.png') })
 
     // Revert generative layer -> restores documentary authenticity
     await page.click('#auth-revoke-btn')
     const revertedPill = await page.textContent('#auth-authenticity-pill')
-    assert.ok(revertedPill?.includes('NON-GENERATIVE'))
+    assert.ok(revertedPill?.includes('无 AI 生成内容'))
 
-    // 6. Test Multi-Engine Coverage + Baryta Paper Surround + English Switch
+    // 6. Test Multi-Engine Coverage + Folded Pro CLI + Baryta Paper Surround + English Switch
     await page.locator('#engines-section').scrollIntoViewIfNeeded()
     await page.click('[data-engine-id="rawtherapee"]')
     const rtText = await page.textContent('#engine-detail-box')
-    assert.ok(rtText?.includes('Locallab'))
+    assert.ok(rtText?.includes('.pp3'), 'RawTherapee detail box must reference .pp3 recipe')
+
+    const proCliDefaultOpen = await page
+      .locator('#pro-cli-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(proCliDefaultOpen, false, 'Pro CLI details must be collapsed by default')
+
+    await page.click('#pro-cli-summary')
+    const proCliOpened = await page
+      .locator('#pro-cli-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(proCliOpened, true, 'Pro CLI details must open on click')
+    const cmdInstallText = await page.textContent('#cmd-install')
+    assert.ok(cmdInstallText?.includes('dsh plugin'), 'Pro CLI install snippet missing dsh plugin')
+
+    await page.click('#pro-cli-summary')
+    const proCliClosed = await page
+      .locator('#pro-cli-details')
+      .evaluate((el) => el instanceof HTMLDetailsElement && el.open)
+    assert.equal(proCliClosed, false, 'Pro CLI details must collapse back cleanly')
+
     await page.screenshot({ path: path.join(SHOT_DIR, '07-desktop-engines.png') })
 
     await page.click('#toggle-surround-btn')
     assert.equal(await page.getAttribute('html', 'data-surround'), 'baryta')
     await page.click('#toggle-lang-btn')
     assert.equal(await page.getAttribute('html', 'lang'), 'en')
+    const enHeroHeading = await page.textContent('#hero-stage h1')
+    assert.ok(
+      enHeroHeading?.includes('Keep the finest moments'),
+      `English switch did not update hero h1: ${enHeroHeading}`,
+    )
     await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
     await page.waitForTimeout(220)
     await page.screenshot({ path: path.join(SHOT_DIR, '08-desktop-baryta-en.png') })

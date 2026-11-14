@@ -35,7 +35,9 @@
 
   .hero-telemetry-bar,
   .agent-insp-header,
-  .install-grid {
+  .install-grid,
+  .quickstart-steps,
+  .prompt-examples-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -105,8 +107,13 @@
   .dr-recipe-pills,
   .auth-mode-tabs,
   .engine-tabs,
-  .diag-kv-grid {
+  .diag-kv-grid,
+  .auth-rec-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .auth-rec-row {
+    gap: 0.2rem;
   }
 
   .dr-mask-kinds {

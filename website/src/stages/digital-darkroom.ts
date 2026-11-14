@@ -85,8 +85,12 @@ export class DigitalDarkroomController {
     this.lang = lang
     this.renderPhotoTabs()
     this.renderRecipeButtons()
+    this.updatePhotoExifBar()
     this.renderRevisionStrip()
     this.updateGuardrailWarnings()
+    if (this.latestStats) {
+      this.updateStatsReadout(this.latestStats)
+    }
     this.renderSidecarCode()
   }
 
@@ -151,8 +155,8 @@ export class DigitalDarkroomController {
       {
         seq: 0,
         id: 'rev_00',
-        label: { zh: 'Rev #0 · 原片线性基线', en: 'Rev #0 · RAW Linear Base' },
-        author: 'scanner',
+        label: { zh: '第 0 版 · 初始原片', en: 'Orig · As Shot' },
+        author: { zh: '原片', en: 'Camera' },
         timestamp: '00:00.0',
         params: baseUngraded,
       },
@@ -160,10 +164,10 @@ export class DigitalDarkroomController {
         seq: 1,
         id: 'rev_01',
         label: {
-          zh: `Rev #1 · ${defaultPreset.name.zh}`,
-          en: `Rev #1 · ${defaultPreset.name.en}`,
+          zh: `第 1 版 · ${defaultPreset.name.zh}`,
+          en: `v1 · ${defaultPreset.name.en}`,
         },
-        author: 'agent:8c04',
+        author: { zh: '澄影初修', en: 'Auto' },
         timestamp: '00:01.8',
         params: cloneParams(graded),
       },
@@ -171,10 +175,7 @@ export class DigitalDarkroomController {
     this.activeRevSeq = 1
     this.params = cloneParams(graded)
 
-    const exifEl = document.getElementById('dr-active-exif')
-    if (exifEl) {
-      exifEl.textContent = `${photo.exif} · shadowEv Ceiling: +${photo.shadowEvCeiling.toFixed(2)} EV`
-    }
+    this.updatePhotoExifBar()
 
     this.syncControlsFromParams()
     this.renderPhotoTabs()
@@ -425,10 +426,10 @@ export class DigitalDarkroomController {
         seq: nextSeq,
         id: `rev_0${nextSeq}`,
         label: {
-          zh: `Rev #${nextSeq} · 手动精调 (${this.params.exposure >= 0 ? '+' : ''}${this.params.exposure.toFixed(2)} EV)`,
-          en: `Rev #${nextSeq} · Custom Grade (${this.params.exposure >= 0 ? '+' : ''}${this.params.exposure.toFixed(2)} EV)`,
+          zh: `第 ${nextSeq} 版 · 我的微调 (${this.params.exposure >= 0 ? '+' : ''}${this.params.exposure.toFixed(2)} EV)`,
+          en: `v${nextSeq} · My Edit (${this.params.exposure >= 0 ? '+' : ''}${this.params.exposure.toFixed(2)} EV)`,
         },
-        author: 'user (panel)',
+        author: { zh: '手动', en: 'You' },
         timestamp: `00:0${nextSeq + 1}.4`,
         params: cloneParams(this.params),
       })
@@ -479,7 +480,7 @@ export class DigitalDarkroomController {
       >
         <span class="rev-dot"></span>
         <span>${tText(r.label, this.lang)}</span>
-        <small>${r.author}</small>
+        <small>${tText(r.author, this.lang)}</small>
       </button>
     `,
       )
@@ -490,6 +491,19 @@ export class DigitalDarkroomController {
         this.checkoutRevision(Number(btn.dataset.revSeq))
       })
     })
+  }
+
+  private updatePhotoExifBar(): void {
+    const exifEl = document.getElementById('dr-active-exif')
+    if (!exifEl) return
+    const p = this.currentPhoto
+    const room =
+      p.shadowEvCeiling >= 3
+        ? { zh: '宽容度充裕，暗部放心提亮', en: 'Clean shadows, plenty of lift room' }
+        : p.shadowEvCeiling >= 1.5
+          ? { zh: '高光与肤色兼顾，适合温和微调', en: 'Balanced light for gentle portrait tuning' }
+          : { zh: '高感夜景，建议适度提亮防噪点', en: 'Low-light shot, keep brightness lift gentle' }
+    exifEl.textContent = `${p.exif} · ${tText(room, this.lang)}`
   }
 
   private bindCurveCanvas(): void {
@@ -666,29 +680,29 @@ export class DigitalDarkroomController {
     if (this.currentPhoto.isPortrait && this.params.clarity > 0) {
       violations.push(
         this.lang === 'zh'
-          ? `人像红线告警：检测到人像但 clarity=${this.params.clarity} > 0（会锐化毛孔与法令纹）`
-          : `Portrait Guardrail: clarity=${this.params.clarity} > 0 accentuates skin pores`,
+          ? '温柔提醒：人像照片把「清晰质感」调太高，皮肤纹理会显得生硬粗糙哦。'
+          : 'Gentle reminder: Turning Clarity up on portraits can make skin look harsh and dry.',
       )
     }
     if (this.currentPhoto.isPortrait && this.params.saturation > 8) {
       violations.push(
         this.lang === 'zh'
-          ? `肤色过饱和红线：人像全局 saturation=${this.params.saturation} > +8（易产生橘子脸，建议用 vibrance）`
-          : `Skin Guardrail: portrait saturation=${this.params.saturation} > +8 risks orange cast`,
+          ? '温柔提醒：整体色彩拉太浓时肤色容易偏橘红，建议改调一点点「自然鲜艳」。'
+          : 'Gentle reminder: High Saturation can push skin toward orange — try subtle Vibrance instead.',
       )
     }
     if (this.params.dehaze > 15) {
       violations.push(
         this.lang === 'zh'
-          ? `去雾滥用红线：dehaze=${this.params.dehaze} 超过 +15 硬上限`
-          : `Dehaze Ceiling: dehaze=${this.params.dehaze} exceeds +15 limit`,
+          ? '温柔提醒：「通透去雾」加太多会让远山雾气失去柔美空气感，暗处也容易发闷。'
+          : 'Gentle reminder: Strong Dehaze flattens natural mist and crushes deep shadows.',
       )
     }
     if (this.params.exposure > this.currentPhoto.shadowEvCeiling + 0.05) {
       violations.push(
         this.lang === 'zh'
-          ? `噪点预算超限：exposure +${this.params.exposure.toFixed(2)} EV 超出传感器暗部余量 (+${this.currentPhoto.shadowEvCeiling.toFixed(2)} EV)`
-          : `Noise Ceiling: exposure +${this.params.exposure.toFixed(2)} EV exceeds shadowEv (+${this.currentPhoto.shadowEvCeiling.toFixed(2)} EV)`,
+          ? '温柔提醒：夜拍暗部拉太亮容易出现颗粒噪点，温和提亮更耐看。'
+          : 'Gentle reminder: Pushing overall brightness too far in low light brings out heavy grain.',
       )
     }
 
@@ -844,8 +858,18 @@ export class DigitalDarkroomController {
   private updateStatsReadout(st: PhotometricStats): void {
     const el = document.getElementById('dr-live-photometrics')
     if (!el) return
-    const clipWarn = st.clipHighPct > 0.8 ? ' ⚠' : ''
-    el.textContent = `p05 ${st.p05} · p50 ${st.p50} · p95 ${st.p95} · clipHigh ${st.clipHighPct.toFixed(2)}%${clipWarn} · clipLow ${st.clipLowPct.toFixed(2)}%`
+    const kelvin = Math.round(this.currentPhoto.baseTempK + this.params.temperature * 36)
+    if (st.clipHighPct > 0.8) {
+      el.textContent =
+        this.lang === 'zh'
+          ? `色温 ${kelvin}K · ⚠ 局部亮部接近发白（可开过曝提示查看）`
+          : `Warmth ${kelvin}K · ⚠ Bright spots nearing highlight clip`
+    } else {
+      el.textContent =
+        this.lang === 'zh'
+          ? `色温 ${kelvin}K · 高光柔和，明暗细节自然`
+          : `Warmth ${kelvin}K · Smooth highlights & balanced tones`
+    }
   }
 
   private renderSidecarCode(): void {

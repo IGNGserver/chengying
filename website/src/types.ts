@@ -13,8 +13,8 @@ export interface HeroPlate {
   title: Bilingual
   location: Bilingual
   exif: string
-  formatBadge: string
-  sha256Short: string
+  formatBadge: Bilingual
+  originalStatus: Bilingual
   masterSrc: string
   masterSrc960: string
   rawSrc: string
@@ -70,7 +70,7 @@ export interface CullingFrame {
   isRawRescue?: boolean
   defectKind: CullDefectKind
   defectBadge: Bilingual
-  diagnosticMono: string
+  diagnosticNote: Bilingual
   exifShort: string
   scores: {
     overall: number
@@ -147,7 +147,7 @@ export interface RevisionEntry {
   seq: number
   id: string
   label: Bilingual
-  author: string
+  author: Bilingual
   timestamp: string
   params: DarkroomParams
 }
@@ -159,26 +159,23 @@ export interface AgentTaskSim {
   title: Bilingual
   sceneCluster: Bilingual
   isSceneAnchor: boolean
-  subagentId: string
-  engine: 'darktable 5.6' | 'RawTherapee 5.13' | 'builtin (32f)'
+  roleBadge: Bilingual
+  engineLabel: Bilingual
   thumbSrc: string
   masterSrc: string
   finalStatus: 'succeeded' | 'unchanged'
   revisionsCount: number
-  tokensUsed: string
-  diagnostics: {
-    p05: number
-    p50: number
-    p95: number
-    shadowEv: number
-    castNote: string
-    maskNote: string
+  photoSummary: {
+    lightFeel: Bilingual
+    focusGoal: Bilingual
+    localTouch: Bilingual
+    outcomeNote: Bilingual
   }
   steps: Array<{
-    pass: string
-    tool: string
+    stepLabel: Bilingual
+    actionTag: Bilingual
     badge: 'diag' | 'skill' | 'apply' | 'revert' | 'anchor' | 'finish'
     detail: Bilingual
-    mono: string
+    note: Bilingual
   }>
 }

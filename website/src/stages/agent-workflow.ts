@@ -57,15 +57,15 @@ export class AgentWorkflowController {
       const doneInSim = this.playbackStep >= 4 || idx <= this.playbackStep
       const statusText = !doneInSim
         ? this.lang === 'zh'
-          ? '等待锚点屏障…'
-          : 'Waiting Scene Barrier…'
+          ? '等待同组先定好基调…'
+          : 'Waiting for key frame…'
         : task.finalStatus === 'unchanged'
           ? this.lang === 'zh'
-            ? 'UNCHANGED · 原片直出'
-            : 'UNCHANGED · Direct'
+            ? '保留原片直出'
+            : 'Kept Untouched'
           : this.lang === 'zh'
-            ? `SUCCEEDED · Rev #${task.revisionsCount}`
-            : `SUCCEEDED · Rev #${task.revisionsCount}`
+            ? `已完成精修 · ${task.revisionsCount} 步微调`
+            : `Graded Cleanly · ${task.revisionsCount} steps`
 
       return `
         <button
@@ -74,11 +74,11 @@ export class AgentWorkflowController {
           data-agent-task="${task.taskId}"
         >
           <div class="agent-card-top">
-            <span class="agent-sub-id">${task.subagentId}</span>
+            <span class="agent-sub-id">${tText(task.engineLabel, this.lang)}</span>
             ${
               task.isSceneAnchor
-                ? `<span class="agent-anchor-pill">${this.lang === 'zh' ? '锚点优先' : 'ANCHOR'}</span>`
-                : `<span class="agent-engine-pill">${task.engine}</span>`
+                ? `<span class="agent-anchor-pill">${tText(task.roleBadge, this.lang)}</span>`
+                : `<span class="agent-engine-pill">${tText(task.roleBadge, this.lang)}</span>`
             }
           </div>
           <div class="agent-card-media">
@@ -90,7 +90,7 @@ export class AgentWorkflowController {
             <small>${tText(task.sceneCluster, this.lang)}</small>
             <div class="agent-status-line">
               <span class="status-dot"></span>
-              <code>${statusText}</code>
+              <span>${statusText}</span>
             </div>
           </div>
         </button>
@@ -115,27 +115,45 @@ export class AgentWorkflowController {
     const visibleSteps =
       this.playbackStep >= 4 ? task.steps : task.steps.slice(0, Math.max(1, this.playbackStep + 1))
 
+    const labels =
+      this.lang === 'zh'
+        ? {
+            kicker: '单张修图笔记',
+            safePill: '仅调配方 · 原片完好不动',
+            light: '当时光线',
+            goal: '修图打算',
+            local: '局部小照顾',
+            outcome: '交片状态',
+          }
+        : {
+            kicker: 'Developing Notes',
+            safePill: 'Recipe Only · Originals Safe',
+            light: 'Scene Light',
+            goal: 'Retouch Goal',
+            local: 'Local Touch',
+            outcome: 'Final Result',
+          }
+
     host.innerHTML = `
       <div class="agent-insp-header">
         <div class="agent-insp-preview">
           <img src="${task.masterSrc}" alt="${tText(task.title, this.lang)}" loading="lazy" decoding="async" />
           <div class="agent-insp-badges">
             <span>${task.fileName}</span>
-            <span>${task.engine}</span>
-            <span>Tokens: ${task.tokensUsed}</span>
+            <span>${tText(task.engineLabel, this.lang)}</span>
           </div>
         </div>
         <div class="agent-insp-diag">
           <div class="insp-kicker">
-            <code>EditOrchestrator · ${task.subagentId}</code>
-            <span class="sandbox-lock">bash/fs: RESTRICTED</span>
+            <span>${labels.kicker} · ${tText(task.roleBadge, this.lang)}</span>
+            <span class="sandbox-lock">${labels.safePill}</span>
           </div>
           <h3>#${task.shotCode} · ${tText(task.title, this.lang)}</h3>
           <div class="diag-kv-grid">
-            <div><label>p05 / p50 / p95</label><code>${task.diagnostics.p05} / ${task.diagnostics.p50} / ${task.diagnostics.p95}</code></div>
-            <div><label>shadowEv Ceiling</label><code>+${task.diagnostics.shadowEv.toFixed(1)} EV</code></div>
-            <div><label>Color / Light</label><code>${task.diagnostics.castNote}</code></div>
-            <div><label>Geometry & Mask</label><code>${task.diagnostics.maskNote}</code></div>
+            <div><label>${labels.light}</label><span>${tText(task.photoSummary.lightFeel, this.lang)}</span></div>
+            <div><label>${labels.goal}</label><span>${tText(task.photoSummary.focusGoal, this.lang)}</span></div>
+            <div><label>${labels.local}</label><span>${tText(task.photoSummary.localTouch, this.lang)}</span></div>
+            <div><label>${labels.outcome}</label><span>${tText(task.photoSummary.outcomeNote, this.lang)}</span></div>
           </div>
         </div>
       </div>
@@ -146,12 +164,12 @@ export class AgentWorkflowController {
             (st) => `
           <li class="agent-step-item badge-${st.badge}">
             <div class="step-pass-col">
-              <span class="step-pass">${st.pass}</span>
-              <code class="step-tool">${st.tool}</code>
+              <span class="step-pass">${tText(st.stepLabel, this.lang)}</span>
+              <strong class="step-tool">${tText(st.actionTag, this.lang)}</strong>
             </div>
             <div class="step-body-col">
               <p>${tText(st.detail, this.lang)}</p>
-              <code class="step-mono-out">${st.mono}</code>
+              <small class="step-mono-out">${tText(st.note, this.lang)}</small>
             </div>
           </li>
         `,

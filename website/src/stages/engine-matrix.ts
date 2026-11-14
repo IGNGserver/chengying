@@ -8,7 +8,7 @@ import type { Lang } from '../types'
 
 export class EngineMatrixController {
   private lang: Lang = 'zh'
-  private activeEngineId: 'darktable' | 'rawtherapee' | 'builtin' | 'ai' = 'darktable'
+  private activeEngineId: 'builtin' | 'darktable' | 'rawtherapee' | 'ai' = 'builtin'
 
   public mount(lang: Lang): void {
     this.lang = lang
@@ -39,14 +39,10 @@ export class EngineMatrixController {
           aria-pressed="${active}"
         >
           <div class="eng-tab-top">
-            <strong>${eng.name}</strong>
-            <span class="eng-ver">${eng.testedVersion}</span>
+            <strong>${tText(eng.name, this.lang)}</strong>
           </div>
-          <div class="eng-tab-nums">
-            <span><b>${eng.operations}</b> ${this.lang === 'zh' ? '模块/算子' : 'Ops'}</span>
-            <span><b>${eng.parameters.toLocaleString()}</b> ${this.lang === 'zh' ? '参数' : 'Params'}</span>
-            <span class="eng-pass">${eng.passed} Pass · ${eng.failed} Fail</span>
-          </div>
+          <span class="eng-ver">${tText(eng.badge, this.lang)}</span>
+          <p class="eng-tab-sub">${tText(eng.subtitle, this.lang)}</p>
         </button>
       `
     }).join('')
@@ -69,32 +65,20 @@ export class EngineMatrixController {
     host.innerHTML = `
       <div class="eng-detail-head">
         <div>
-          <span class="eng-kicker">chengying engines verify ${eng.id}</span>
-          <h3>${eng.name} <small>${eng.sidecarFormat}</small></h3>
-        </div>
-        <div class="eng-health-pill">
-          <span class="health-dot"></span>
-          <code>smokeTest: 48×32 render ✓ · fail: ${eng.failed}</code>
+          <span class="eng-kicker">${tText(eng.badge, this.lang)}</span>
+          <h3>${tText(eng.name, this.lang)}</h3>
+          <small class="eng-sidecar-sub">${tText(eng.sidecarFormat, this.lang)}</small>
         </div>
       </div>
 
-      <p class="eng-discovery-desc">
-        <strong>${this.lang === 'zh' ? '自省机制：' : 'Introspection: '}</strong>
-        ${tText(eng.discoveryMethod, this.lang)}
-      </p>
+      <p class="eng-discovery-desc">${tText(eng.summary, this.lang)}</p>
 
       <ul class="eng-highlight-list">
         ${eng.highlights.map((h) => `<li>${tText(h, this.lang)}</li>`).join('')}
       </ul>
 
-      ${
-        eng.skipReason
-          ? `<p class="eng-skip-note">${tText(eng.skipReason, this.lang)}</p>`
-          : ''
-      }
-
       <div class="eng-ops-cloud">
-        ${eng.sampleOps.map((op) => `<code>${op}</code>`).join('')}
+        ${eng.capabilities.map((cap) => `<span>${tText(cap, this.lang)}</span>`).join('')}
       </div>
     `
   }
@@ -105,7 +89,7 @@ export class EngineMatrixController {
       skillsHost.innerHTML = BUNDLED_SKILLS_LIST.map(
         (sk) => `
         <article class="skill-card">
-          <code>${sk.id}</code>
+          <span class="skill-tag">${tText(sk.tag, this.lang)}</span>
           <h4>${tText(sk.title, this.lang)}</h4>
           <p>${tText(sk.desc, this.lang)}</p>
         </article>
@@ -118,7 +102,7 @@ export class EngineMatrixController {
       fmtHost.innerHTML = RAW_FORMAT_BADGES.map(
         (f) => `
         <div class="raw-fmt-chip">
-          <strong>${f.brand}</strong>
+          <strong>${tText(f.brand, this.lang)}</strong>
           <code>${f.exts}</code>
         </div>
       `,
