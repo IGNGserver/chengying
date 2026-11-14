@@ -1,0 +1,59 @@
+:root,
+[data-surround='darkroom'] {
+  color-scheme: dark;
+  --bg-canvas: #09090b;
+  --bg-elevated: #101014;
+  --bg-panel: #15151b;
+  --bg-panel-soft: rgba(20, 20, 26, 0.82);
+  --bg-inset: #0c0c0f;
+  --text-primary: #f2ede4;
+  --text-secondary: #b5ada0;
+  --text-muted: #7f786d;
+  --border-hairline: rgba(242, 237, 228, 0.11);
+  --border-strong: rgba(242, 237, 228, 0.24);
+  --accent-amber: #d49b54;
+  --accent-amber-bright: #ecc07c;
+  --accent-amber-soft: rgba(212, 155, 84, 0.15);
+  --accent-emerald: #4fa87c;
+  --accent-crimson: #de5b54;
+  --accent-cobalt: #5c92e8;
+  --face-inset-yellow: #ffd54f;
+  --header-glass: rgba(9, 9, 11, 0.78);
+  --shadow-plate: 0 28px 70px rgba(0, 0, 0, 0.62);
+}
+
+[data-surround='baryta'] {
+  color-scheme: light;
+  --bg-canvas: #f3efe7;
+  --bg-elevated: #eae4d8;
+  --bg-panel: #fbf8f2;
+  --bg-panel-soft: rgba(251, 248, 242, 0.88);
+  --bg-inset: #e5dfd2;
+  --text-primary: #171614;
+  --text-secondary: #4e4a43;
+  --text-muted: #787268;
+  --border-hairline: rgba(23, 22, 20, 0.12);
+  --border-strong: rgba(23, 22, 20, 0.26);
+  --accent-amber: #a86d24;
+  --accent-amber-bright: #8a5616;
+  --accent-amber-soft: rgba(168, 109, 36, 0.12);
+  --accent-emerald: #267951;
+  --accent-crimson: #c23b34;
+  --accent-cobalt: #2f65ba;
+  --face-inset-yellow: #eab308;
+  --header-glass: rgba(243, 239, 231, 0.84);
+  --shadow-plate: 0 24px 56px rgba(28, 24, 18, 0.14);
+}
+
+:root {
+  --font-serif: 'Cormorant Variable', Georgia, 'Songti SC', 'STSong', 'Source Han Serif SC',
+    'Noto Serif CJK SC', serif;
+  --font-sans: 'Plus Jakarta Sans Variable', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Hiragino Sans GB', 'Noto Sans CJK SC', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+
+  --max-width: 1380px;
+  --gutter: clamp(1.1rem, 3vw, 2.75rem);
+  --ease-optical: cubic-bezier(0.22, 1, 0.36, 1);
+}
