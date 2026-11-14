@@ -1,0 +1,18 @@
+# Cloudflare Pages 响应头策略（澄影 Chengying 官网）
+# Vite 构建产物 /assets/* 带有内容哈希，启用一年期 immutable 强缓存；
+# 高画质摄影底片 /photos/* 启用 7 天边缘缓存 + 后台无感刷新；
+# HTML 与元数据保持 Pages 默认协商缓存（max-age=0, must-revalidate），发布后即刻生效。
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/photos/*
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+
+# 全站零第三方追踪脚本、零内嵌外部 iframe、零敏感硬件权限请求
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
